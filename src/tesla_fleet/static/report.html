@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fleet · Driver Report</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <nav class="nav">
+    <div class="brand">M3 PERFORMANCE</div>
+    <a href="/">Dashboard</a>
+    <a href="/report" class="active">Driver</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span class="status-dot online">Report</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Driver Report</div>
+        <h1>Carson</h1>
+        <div class="sub" id="period">—</div>
+      </div>
+      <div class="vin-bar">
+        <label>Driver</label>
+        <input id="driver-input" value="Carson" spellcheck="false" />
+        <button id="reload" class="btn">Reload</button>
+      </div>
+    </div>
+
+    <section class="card col-12" style="grid-column:span 12; padding:32px; margin-bottom:16px;">
+      <div class="grade-hero">
+        <div class="grade-medal"><div class="grade-letter" id="grade">—</div></div>
+        <div class="grade-meta">
+          <div class="driver-label">Driving Score</div>
+          <div class="driver-name" id="driver-name">Carson</div>
+          <div class="score"><b id="score">0</b> / 100 · <span id="samples">0</span> samples</div>
+          <div class="muted" style="margin-top:14px; max-width:520px; font-size:13px; line-height:1.5">
+            Score deducts 4 pts per hard brake, 3 pts per rapid acceleration, 2 pts per over-limit reading.
+            Telemetry sampled from <code>vehicle_data</code> at the configured poll interval.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card col-12">
+        <div class="card-label">Performance</div>
+        <div class="stat-grid">
+          <div class="stat"><div class="k">Max Speed</div><div class="v tnum"><span id="max-speed">—</span> <span class="muted" style="font-size:14px">mph</span></div></div>
+          <div class="stat"><div class="k">Avg Speed</div><div class="v tnum"><span id="avg-speed">—</span> <span class="muted" style="font-size:14px">mph</span></div></div>
+          <div class="stat"><div class="k">Drive Time</div><div class="v tnum"><span id="duration">—</span> <span class="muted" style="font-size:14px">min</span></div></div>
+          <div class="stat"><div class="k">Miles</div><div class="v tnum" id="miles">—</div></div>
+          <div class="stat warn"><div class="k">Hard Brakes</div><div class="v tnum bad" id="brakes">—</div></div>
+          <div class="stat warn"><div class="k">Rapid Accels</div><div class="v tnum bad" id="accels">—</div></div>
+          <div class="stat warn"><div class="k">Over Limit</div><div class="v tnum bad" id="over">—</div></div>
+          <div class="stat"><div class="k">Last Seen</div><div class="v" id="last-seen" style="font-size:14px">—</div></div>
+        </div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Recent Incidents</div>
+        <ul id="incidents" class="events"></ul>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function fmt(n, d=0) {
+      if (n == null || Number.isNaN(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+    function fmtTs(ts) { return ts ? new Date(ts*1000).toLocaleString() : "—"; }
+
+    async function load() {
+      const driver = $("driver-input").value.trim() || "Carson";
+      const r = await fetch(`/api/report/${encodeURIComponent(driver)}`);
+      const x = await r.json();
+
+      $("driver-name").textContent = x.driver;
+      $("grade").textContent = x.grade ?? "—";
+      $("score").textContent = x.score ?? 0;
+      $("samples").textContent = x.samples ?? 0;
+      $("period").textContent = x.first_seen
+        ? `${fmtTs(x.first_seen)} → ${fmtTs(x.last_seen)}`
+        : "No telemetry yet — start the monitor";
+
+      const s = x.stats || {};
+      $("max-speed").textContent = fmt(s.max_speed_mph, 0);
+      $("avg-speed").textContent = fmt(s.avg_speed_mph, 1);
+      $("duration").textContent = fmt(s.duration_minutes, 1);
+      $("miles").textContent = fmt(s.miles_estimate, 1);
+      $("brakes").textContent = fmt(s.hard_brakes, 0);
+      $("accels").textContent = fmt(s.rapid_accels, 0);
+      $("over").textContent = fmt(s.over_limit_count, 0);
+      $("last-seen").textContent = fmtTs(x.last_seen);
+
+      const ul = $("incidents"); ul.innerHTML = "";
+      const incidents = (x.recent_incidents || []).slice().reverse();
+      if (!incidents.length) {
+        ul.innerHTML = '<li><span class="muted">No incidents on record. Smooth driving.</span></li>';
+        return;
+      }
+      for (const i of incidents) {
+        const li = document.createElement("li");
+        const time = new Date(i.ts*1000).toLocaleString();
+        const cls = i.type === "hard_brake" ? "brake" : "accel";
+        const tag = i.type === "hard_brake" ? "Hard brake" : "Rapid accel";
+        const map = i.maps_url ? ` · <a href="${i.maps_url}" target="_blank" rel="noopener">map</a>` : "";
+        li.className = cls;
+        li.innerHTML = `
+          <span class="ts">${time}</span>
+          <span class="tag">${tag}</span>
+          <span class="body">${i.speed_mph ?? "—"} mph <span class="meta">Δ ${i.delta_mph_per_s} mph/s${map}</span></span>`;
+        ul.appendChild(li);
+      }
+    }
+    document.addEventListener("DOMContentLoaded", () => {
+      $("reload").addEventListener("click", load);
+      $("driver-input").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+      load();
+      setInterval(load, 15_000);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fleet · Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <nav class="nav">
+    <div class="brand">M3 PERFORMANCE</div>
+    <a href="/" class="active">Dashboard</a>
+    <a href="/report">Driver</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span id="status-pill" class="status-dot offline">Offline</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Live Telemetry</div>
+        <h1 id="vehicle-name">—</h1>
+        <div class="sub" id="vehicle-vin">No vehicle connected</div>
+      </div>
+      <div class="vin-bar">
+        <label for="vin">VIN</label>
+        <input id="vin" placeholder="5YJ3..." spellcheck="false" />
+        <button id="connect" class="btn">Connect</button>
+      </div>
+    </div>
+
+    <section class="grid">
+      <div class="card col-4">
+        <div class="card-label">Speed</div>
+        <div class="speed-display">
+          <span class="num tnum" id="speed">0</span>
+          <span class="unit">MPH</span>
+        </div>
+        <div class="speed-bar"><div class="speed-bar-fill" id="speed-bar"></div></div>
+        <div class="card-sub">Limit <span id="limit" class="tnum">—</span></div>
+      </div>
+
+      <div class="card col-4">
+        <div class="card-label">Battery</div>
+        <div class="card-value tnum"><span id="battery-pct">—</span><span class="muted" style="font-size:20px">%</span></div>
+        <div class="battery"><div class="battery-fill" id="battery-fill"></div></div>
+        <div class="card-row" style="margin-top:10px"><span class="k">Range</span><span class="v" id="range">— mi</span></div>
+        <div class="card-row"><span class="k">Charge</span><span class="v" id="charging">Idle</span></div>
+      </div>
+
+      <div class="card col-4 accent">
+        <div class="card-label">Active Driver</div>
+        <div class="card-value" id="driver">—</div>
+        <div class="card-row" style="margin-top:14px"><span class="k">Shift</span><span class="v" id="shift">P</span></div>
+        <div class="card-row"><span class="k">Locked</span><span class="v" id="locked">—</span></div>
+        <div class="card-row"><span class="k">Cabin</span><span class="v" id="cabin">— °F</span></div>
+      </div>
+
+      <div class="card col-6">
+        <div class="card-label">Location</div>
+        <div class="coords" id="coords">—</div>
+        <div class="card-sub">Odometer <span id="odo" class="tnum">—</span> mi</div>
+        <div class="coords-actions">
+          <a id="maps" class="btn ghost" target="_blank" rel="noopener">Open Map</a>
+        </div>
+      </div>
+
+      <div class="card col-6">
+        <div class="card-label">Recent Events</div>
+        <ul id="events" class="events"></ul>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

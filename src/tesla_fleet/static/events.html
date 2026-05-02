@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fleet · Events</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <nav class="nav">
+    <div class="brand">M3 PERFORMANCE</div>
+    <a href="/">Dashboard</a>
+    <a href="/report">Driver</a>
+    <a href="/roi">ROI</a>
+    <a href="/events" class="active">Events</a>
+    <div class="spacer"></div>
+    <span class="status-dot online" id="count-pill">0 events</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Telemetry Log</div>
+        <h1>Events</h1>
+        <div class="sub">Live feed from <code>monitoring_log.json</code></div>
+      </div>
+    </div>
+
+    <div class="filters">
+      <select id="type-filter">
+        <option value="">All event types</option>
+        <option value="driver_sample">Driver samples</option>
+        <option value="roi_report">ROI reports</option>
+      </select>
+      <select id="incident-filter">
+        <option value="">All readings</option>
+        <option value="hard_brake">Hard brakes only</option>
+        <option value="rapid_accel">Rapid accels only</option>
+      </select>
+      <input id="driver-filter" placeholder="Filter by driver" />
+      <input id="text-filter" placeholder="Search…" />
+      <button id="reload" class="btn ghost">Refresh</button>
+    </div>
+
+    <section class="card col-12">
+      <ul id="events" class="events" style="max-height:none"></ul>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function fmt(n, d=0) {
+      if (n == null || Number.isNaN(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+
+    function render(events) {
+      const ul = $("events"); ul.innerHTML = "";
+      const incident = $("incident-filter").value;
+      const text = $("text-filter").value.toLowerCase();
+      let shown = 0;
+      for (const ev of events) {
+        if (incident && ev.event?.type !== incident) continue;
+        const blob = JSON.stringify(ev).toLowerCase();
+        if (text && !blob.includes(text)) continue;
+
+        const time = new Date((ev.ts || 0) * 1000).toLocaleString();
+        let cls = "", tag = ev.type, body = "";
+        if (ev.type === "driver_sample") {
+          const e = ev.event;
+          if (e?.type === "hard_brake") {
+            cls = "brake"; tag = "Hard brake";
+            body = `<b>${ev.driver}</b> · ${ev.speed_mph} mph <span class="meta">Δ ${e.delta_mph_per_s} mph/s · limit ${ev.speed_limit_mph ?? "—"}</span>`;
+          } else if (e?.type === "rapid_accel") {
+            cls = "accel"; tag = "Rapid accel";
+            body = `<b>${ev.driver}</b> · ${ev.speed_mph} mph <span class="meta">Δ ${e.delta_mph_per_s} mph/s</span>`;
+          } else {
+            tag = "Drive";
+            body = `<b>${ev.driver}</b> · ${ev.speed_mph ?? "—"} mph <span class="meta">${ev.shift_state ?? ""}</span>`;
+          }
+          if (ev.maps_url) body += ` · <a href="${ev.maps_url}" target="_blank" rel="noopener">map</a>`;
+        } else if (ev.type === "roi_report") {
+          cls = "roi"; tag = "ROI";
+          body = `${fmt(ev.total_miles, 1)} mi · ${fmt(ev.total_kwh, 2)} kWh <span class="meta">saved $${fmt(ev.savings_usd, 2)}</span>`;
+        } else {
+          body = `<span class="meta">${JSON.stringify(ev)}</span>`;
+        }
+
+        const li = document.createElement("li");
+        li.className = cls;
+        li.innerHTML = `<span class="ts">${time}</span><span class="tag">${tag}</span><span class="body">${body}</span>`;
+        ul.appendChild(li);
+        shown++;
+      }
+      $("count-pill").textContent = `${shown} shown`;
+      if (!shown) ul.innerHTML = '<li class="empty">No matching events.</li>';
+    }
+
+    async function load() {
+      const params = new URLSearchParams({ limit: "500" });
+      const t = $("type-filter").value;
+      const d = $("driver-filter").value.trim();
+      if (t) params.set("type", t);
+      if (d) params.set("driver", d);
+      const r = await fetch("/api/events?" + params);
+      const events = await r.json();
+      render(events);
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      ["type-filter","incident-filter","driver-filter","text-filter"].forEach(id =>
+        $(id).addEventListener("input", load));
+      $("reload").addEventListener("click", load);
+      load();
+      setInterval(load, 10_000);
+    });
+  </script>
+</body>
+</html>

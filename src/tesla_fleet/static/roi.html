@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fleet · ROI</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <nav class="nav">
+    <div class="brand">M3 PERFORMANCE</div>
+    <a href="/">Dashboard</a>
+    <a href="/report">Driver</a>
+    <a href="/roi" class="active">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span class="status-dot online">TCO</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Total Cost of Ownership</div>
+        <h1>Electric vs. ICE Equivalent</h1>
+        <div class="sub" id="assumptions">—</div>
+      </div>
+    </div>
+
+    <section class="grid">
+      <div class="card col-8 accent">
+        <div class="savings-hero">
+          <div class="label">Lifetime Savings</div>
+          <div class="num positive" id="savings">$0.00</div>
+          <div class="delta">vs. 28 mpg gasoline sedan at $4.39/gal · electric at $0.14/kWh</div>
+        </div>
+      </div>
+
+      <div class="card col-4">
+        <div class="card-label">Totals</div>
+        <div class="card-row"><span class="k">Miles</span><span class="v tnum" id="miles">0</span></div>
+        <div class="card-row"><span class="k">Energy</span><span class="v tnum" id="kwh">0 kWh</span></div>
+        <div class="card-row"><span class="k">Effective</span><span class="v tnum" id="mi-per-kwh">— mi/kWh</span></div>
+        <div class="card-row"><span class="k">Cost / mile</span><span class="v tnum" id="cost-per-mi">—</span></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Cost Comparison</div>
+        <div id="compare" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Equivalents</div>
+        <div class="stat-grid">
+          <div class="stat">
+            <div class="k">Gallons Avoided</div>
+            <div class="v tnum" id="gallons">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">CO₂ Avoided</div>
+            <div class="v tnum"><span id="co2">—</span> <span class="muted" style="font-size:14px">lb</span></div>
+          </div>
+          <div class="stat">
+            <div class="k">Tank Fills (14 gal)</div>
+            <div class="v tnum" id="fills">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">Trees / Year</div>
+            <div class="v tnum" id="trees">—</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function fmt(n, d=2) {
+      if (n == null || Number.isNaN(n)) return "—";
+      return Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+
+    async function load() {
+      const r = await fetch("/api/roi");
+      const x = await r.json();
+      const a = x.assumptions || {};
+      $("assumptions").textContent =
+        `Gas $${a.gas_price_per_gal}/gal · ${a.mpg_baseline} MPG baseline · Electric $${a.elec_price_per_kwh}/kWh`;
+
+      const savings = x.savings_usd ?? 0;
+      const sEl = $("savings");
+      sEl.textContent = `$${fmt(savings, 2)}`;
+      sEl.classList.toggle("positive", savings >= 0);
+      sEl.classList.toggle("negative", savings < 0);
+
+      $("miles").textContent = fmt(x.total_miles, 1);
+      $("kwh").textContent = `${fmt(x.total_kwh, 2)} kWh`;
+      const mipk = x.total_kwh > 0 ? x.total_miles / x.total_kwh : 0;
+      $("mi-per-kwh").textContent = mipk ? `${fmt(mipk, 2)} mi/kWh` : "—";
+      const cpm = x.total_miles > 0 ? x.electric_cost_usd / x.total_miles : 0;
+      $("cost-per-mi").textContent = cpm ? `$${fmt(cpm, 3)}` : "—";
+
+      // Comparison bars
+      const max = Math.max(x.gas_equivalent_cost_usd || 0, x.electric_cost_usd || 0, 1);
+      const gasPct = (x.gas_equivalent_cost_usd / max) * 100;
+      const elecPct = (x.electric_cost_usd / max) * 100;
+      $("compare").innerHTML = `
+        <div class="compare-row gas">
+          <span class="lbl">Gas ICE</span>
+          <div class="bar"><div style="width:${gasPct}%"></div></div>
+          <span class="amt">$${fmt(x.gas_equivalent_cost_usd, 2)}</span>
+        </div>
+        <div class="compare-row elec">
+          <span class="lbl">Electric</span>
+          <div class="bar"><div style="width:${elecPct}%"></div></div>
+          <span class="amt">$${fmt(x.electric_cost_usd, 2)}</span>
+        </div>`;
+
+      // Equivalents
+      const gallons = (x.total_miles || 0) / (a.mpg_baseline || 28);
+      const co2 = gallons * 19.6;          // lb CO₂ per gallon of gas
+      const fills = gallons / 14;
+      const trees = co2 / 48;               // ~48 lb CO₂ absorbed per tree per year
+      $("gallons").textContent = fmt(gallons, 1);
+      $("co2").textContent = fmt(co2, 0);
+      $("fills").textContent = fmt(fills, 1);
+      $("trees").textContent = fmt(trees, 1);
+    }
+    document.addEventListener("DOMContentLoaded", () => { load(); setInterval(load, 15_000); });
+  </script>
+</body>
+</html>
