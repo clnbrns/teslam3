@@ -7,9 +7,12 @@ import logging
 
 import typer
 
+from pathlib import Path
+
 from tesla_fleet.auth import build_authorize_url
 from tesla_fleet.client import TeslaFleetClient
 from tesla_fleet.config import Settings
+from tesla_fleet.monitor import Monitor
 from tesla_fleet.tokens import TokenStore, exchange_code
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
@@ -104,6 +107,43 @@ def vehicles_cmd(vin: str, name: str, payload: str = "{}") -> None:
             typer.echo(json.dumps(await client.command(vin, name, json.loads(payload)), indent=2))
 
     asyncio.run(_run())
+
+
+@app.command("monitor")
+def monitor(
+    vin: str,
+    profile: str = typer.Option("Carson", help="Target driver profile name"),
+    interval: float = typer.Option(30.0, help="Poll interval (seconds)"),
+    log_file: Path = typer.Option(Path("monitoring_log.json"), help="JSON-lines event log"),
+    roi_state: Path = typer.Option(Path(".roi_state.json"), help="Persistent ROI state"),
+    iterations: int = typer.Option(0, help="Stop after N polls (0 = run forever)"),
+) -> None:
+    """Poll a vehicle, log driver activity for a target profile, and track ROI."""
+
+    async def _run() -> None:
+        client, _ = _client_ctx()
+        async with client:
+            mon = Monitor(
+                client=client,
+                vin=vin,
+                target_profile=profile,
+                log_path=log_file,
+                roi_path=roi_state,
+                poll_seconds=interval,
+            )
+            await mon.run(iterations=iterations or None)
+            mon.print_report()
+
+    asyncio.run(_run())
+
+
+@app.command("report")
+def report(roi_state: Path = typer.Option(Path(".roi_state.json"))) -> None:
+    """Print the ROI / TCO report from saved state without polling."""
+    from tesla_fleet.monitor import RoiState
+
+    state = RoiState.load(roi_state)
+    typer.echo(json.dumps(state.report(), indent=2))
 
 
 if __name__ == "__main__":
