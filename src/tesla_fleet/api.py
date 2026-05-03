@@ -147,7 +147,7 @@ def public_key() -> str:
 # --- Dashboard data endpoints ---
 
 MPG_BASELINE = 28.0
-ELEC_PRICE = 0.14
+ELEC_PRICE = 0.134  # blended home rate, Fort Worth
 
 
 @app.get("/api/roi")
