@@ -1,14 +1,19 @@
 # Fly.io deployment config — single shared-cpu-1x VM in DFW.
 # Bootstrap:
-#   fly launch --no-deploy
+#   fly launch --no-deploy --copy-config
 #   fly volumes create tesla_data --size 1 --region dfw
-#   fly secrets set TESLA_CLIENT_ID=... TESLA_CLIENT_SECRET=... \
-#                    TESLA_REDIRECT_URI=https://<your-domain>/callback \
-#                    TESLA_PUBLIC_HOSTNAME=<your-domain>
-#   fly certs add <your-domain>
+#   fly secrets set \
+#     TESLA_CLIENT_ID=$(grep TESLA_CLIENT_ID .env | cut -d= -f2) \
+#     TESLA_CLIENT_SECRET=$(grep TESLA_CLIENT_SECRET .env | cut -d= -f2) \
+#     TESLA_REDIRECT_URI=https://tesla.burnsbuilt.co/callback \
+#     TESLA_PUBLIC_HOSTNAME=tesla.burnsbuilt.co \
+#     TESLA_PRIVATE_KEY="$(cat secrets/tesla_private.pem)"
+#   fly certs add tesla.burnsbuilt.co
 #   fly deploy
+# Then in your DNS provider:
+#   CNAME tesla.burnsbuilt.co → <app>.fly.dev
 
-app = "tesla-fleet"
+app = "burnsbuilt-tesla"
 primary_region = "dfw"
 
 [build]

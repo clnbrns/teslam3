@@ -16,3 +16,4 @@ monitoring_log.json
 tesla.db
 tesla.db-*
 .DS_Store
+secrets/
