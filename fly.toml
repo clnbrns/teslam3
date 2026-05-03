@@ -1,0 +1,29 @@
+# Fly.io deployment config — single shared-cpu-1x VM in DFW.
+# Bootstrap:
+#   fly launch --no-deploy
+#   fly volumes create tesla_data --size 1 --region dfw
+#   fly secrets set TESLA_CLIENT_ID=... TESLA_CLIENT_SECRET=... \
+#                    TESLA_REDIRECT_URI=https://<your-domain>/callback \
+#                    TESLA_PUBLIC_HOSTNAME=<your-domain>
+#   fly certs add <your-domain>
+#   fly deploy
+
+app = "tesla-fleet"
+primary_region = "dfw"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "tesla_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

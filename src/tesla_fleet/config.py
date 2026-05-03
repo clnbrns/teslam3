@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     scopes: str = "openid offline_access user_data vehicle_device_data vehicle_cmds vehicle_charging_cmds"
     token_store_path: str = Field(default=".tokens.json", alias="TOKEN_STORE_PATH")
     vehicle_command_proxy_url: str = Field(default="", alias="VEHICLE_COMMAND_PROXY_URL")
+    public_hostname: str = Field(default="", alias="TESLA_PUBLIC_HOSTNAME")
+    default_driver: str = Field(default="Colin", alias="TESLA_DEFAULT_DRIVER")
 
     @property
     def api_base(self) -> str:

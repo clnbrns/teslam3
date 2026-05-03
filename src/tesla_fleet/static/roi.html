@@ -28,8 +28,12 @@
     <div class="page-head">
       <div>
         <div class="eyebrow">Total Cost of Ownership</div>
-        <h1>Electric vs. ICE Equivalent</h1>
+        <h1>Electric vs. Real Vehicles You Owned</h1>
         <div class="sub" id="assumptions">—</div>
+      </div>
+      <div>
+        <label for="comp-select" class="muted" style="font-size:11px;letter-spacing:.18em;text-transform:uppercase;">Compare to</label>
+        <select id="comp-select" style="margin-left:8px"></select>
       </div>
     </div>
 
@@ -38,7 +42,7 @@
         <div class="savings-hero">
           <div class="label">Lifetime Savings</div>
           <div class="num positive" id="savings">$0.00</div>
-          <div class="delta" id="savings-sub">vs. 28 mpg gasoline · DFW historical pricing</div>
+          <div class="delta" id="savings-sub">vs. — · DFW historical pricing</div>
         </div>
       </div>
 
@@ -52,7 +56,20 @@
       </div>
 
       <div class="card col-12">
-        <div class="card-label">Cost Comparison</div>
+        <div class="card-label">Comparison Garage</div>
+        <div id="comparison-garage" class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-top:6px"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Cumulative Savings Over Time</div>
+        <div id="chart-wrap" style="margin-top:12px"></div>
+        <div class="muted" style="margin-top:8px;font-size:12px">
+          Each line shows cumulative dollars saved by driving the Model 3 instead of that ICE, priced at the DFW gas average for the week of each charging session.
+        </div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Cost Comparison · Selected Vehicle</div>
         <div id="compare" style="margin-top:8px"></div>
       </div>
 
@@ -82,64 +99,172 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
-    function fmt(n, d=2) {
-      if (n == null || Number.isNaN(n)) return "—";
-      return Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
-    }
+    const fmt = (n, d=2) => (n == null || Number.isNaN(n)) ? "—"
+      : Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 
-    async function load() {
-      const r = await fetch("/api/roi");
-      const x = await r.json();
-      const a = x.assumptions || {};
+    const COMP_COLORS = {
+      generic_sedan: "#8a948f",
+      bronco_wildtrak_2dr: "#c8232c",
+      defender_110_3l: "#3d6b54",
+    };
+
+    let LAST_DATA = null;
+    let SELECTED_KEY = "bronco_wildtrak_2dr";
+
+    function renderHeadline(data, comp) {
+      const a = data.assumptions || {};
       $("assumptions").textContent =
-        `Gas $${a.gas_price_per_gal}/gal · ${a.mpg_baseline} MPG baseline · Electric $${a.elec_price_per_kwh}/kWh`;
+        `Lifetime ${data.sessions} sessions · ${fmt(data.total_kwh,1)} kWh · ${a.mi_per_kwh} mi/kWh from ${a.mi_per_kwh_source}`;
 
-      const savings = x.savings_usd ?? 0;
+      const savings = comp.savings_usd;
       const sEl = $("savings");
-      sEl.textContent = `$${fmt(savings, 2)}`;
+      sEl.textContent = `${savings >= 0 ? "" : "-"}$${fmt(Math.abs(savings),2)}`;
       sEl.classList.toggle("positive", savings >= 0);
       sEl.classList.toggle("negative", savings < 0);
+      $("savings-sub").textContent =
+        `vs. ${comp.name} (${comp.mpg} MPG, ${comp.fuel}) · DFW historical · electric $${a.elec_price_per_kwh}/kWh`;
 
-      const sub = $("savings-sub");
-      if (sub && a.gas_price_source) {
-        sub.textContent = `vs. ${a.mpg_baseline} mpg ICE · ${a.gas_price_source} · electric $${a.elec_price_per_kwh}/kWh`;
-      }
-
-      $("sessions").textContent = fmt(x.sessions || 0, 0);
-      $("miles").textContent = fmt(x.total_miles, 0);
-      $("kwh").textContent = `${fmt(x.total_kwh, 1)} kWh`;
-      const mipk = x.total_kwh > 0 ? x.total_miles / x.total_kwh : 0;
+      $("sessions").textContent = fmt(data.sessions, 0);
+      $("miles").textContent = fmt(data.total_miles, 0);
+      $("kwh").textContent = `${fmt(data.total_kwh, 1)} kWh`;
+      const mipk = data.total_kwh > 0 ? data.total_miles / data.total_kwh : 0;
       $("mi-per-kwh").textContent = mipk ? `${fmt(mipk, 2)} mi/kWh` : "—";
-      const cpm = x.total_miles > 0 ? x.electric_cost_usd / x.total_miles : 0;
+      const cpm = data.total_miles > 0 ? data.electric_cost_usd / data.total_miles : 0;
       $("cost-per-mi").textContent = cpm ? `$${fmt(cpm, 3)}` : "—";
 
-      // Comparison bars
-      const max = Math.max(x.gas_equivalent_cost_usd || 0, x.electric_cost_usd || 0, 1);
-      const gasPct = (x.gas_equivalent_cost_usd / max) * 100;
-      const elecPct = (x.electric_cost_usd / max) * 100;
+      // Comparison bars for selected vehicle
+      const max = Math.max(comp.gas_cost_usd || 0, data.electric_cost_usd || 0, 1);
+      const gasPct = (comp.gas_cost_usd / max) * 100;
+      const elecPct = (data.electric_cost_usd / max) * 100;
       $("compare").innerHTML = `
         <div class="compare-row gas">
-          <span class="lbl">Gas ICE</span>
-          <div class="bar"><div style="width:${gasPct}%"></div></div>
-          <span class="amt">$${fmt(x.gas_equivalent_cost_usd, 2)}</span>
+          <span class="lbl">${comp.name.split(' ').slice(0,3).join(' ')}</span>
+          <div class="bar"><div style="width:${gasPct}%;background:${COMP_COLORS[comp.key]}"></div></div>
+          <span class="amt">$${fmt(comp.gas_cost_usd, 2)}</span>
         </div>
         <div class="compare-row elec">
-          <span class="lbl">Electric</span>
+          <span class="lbl">Model 3 (Electric)</span>
           <div class="bar"><div style="width:${elecPct}%"></div></div>
-          <span class="amt">$${fmt(x.electric_cost_usd, 2)}</span>
+          <span class="amt">$${fmt(data.electric_cost_usd, 2)}</span>
         </div>`;
 
-      // Equivalents
-      const gallons = (x.total_miles || 0) / (a.mpg_baseline || 28);
-      const co2 = gallons * 19.6;          // lb CO₂ per gallon of gas
+      // Equivalents — based on selected comparison
+      const gallons = (data.total_miles || 0) / (comp.mpg || 28);
+      const co2 = gallons * 19.6;
       const fills = gallons / 14;
-      const trees = co2 / 48;               // ~48 lb CO₂ absorbed per tree per year
+      const trees = co2 / 48;
       $("gallons").textContent = fmt(gallons, 1);
       $("co2").textContent = fmt(co2, 0);
       $("fills").textContent = fmt(fills, 1);
       $("trees").textContent = fmt(trees, 1);
     }
-    document.addEventListener("DOMContentLoaded", () => { load(); setInterval(load, 15_000); });
+
+    function renderGarage(data) {
+      const garage = $("comparison-garage");
+      garage.innerHTML = "";
+      for (const c of data.comparisons) {
+        const isSel = c.key === SELECTED_KEY;
+        const div = document.createElement("div");
+        div.className = "stat" + (isSel ? "" : "");
+        div.style.cursor = "pointer";
+        div.style.borderLeft = `3px solid ${COMP_COLORS[c.key] || "#666"}`;
+        if (isSel) div.style.background = "rgba(47, 82, 64, 0.25)";
+        div.innerHTML = `
+          <div class="k">${c.name}</div>
+          <div class="v tnum" style="font-size:24px">$${fmt(c.savings_usd, 0)}</div>
+          <div class="muted" style="font-size:11px;margin-top:4px">
+            ${c.mpg} MPG · ${c.fuel} · gas would've cost <b>$${fmt(c.gas_cost_usd,0)}</b>
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:2px">${c.note}</div>`;
+        div.onclick = () => { SELECTED_KEY = c.key; renderAll(); };
+        garage.appendChild(div);
+      }
+
+      const sel = $("comp-select");
+      sel.innerHTML = "";
+      for (const c of data.comparisons) {
+        const o = document.createElement("option");
+        o.value = c.key; o.textContent = c.name;
+        if (c.key === SELECTED_KEY) o.selected = true;
+        sel.appendChild(o);
+      }
+    }
+
+    function renderChart(data) {
+      const series = data.sessions_series;
+      if (!series.length) { $("chart-wrap").innerHTML = '<div class="empty">No charging sessions.</div>'; return; }
+
+      const W = 1200, H = 260, P = { l: 60, r: 20, t: 10, b: 30 };
+      const ts = series.map(s => s.ts);
+      const xMin = Math.min(...ts), xMax = Math.max(...ts);
+      const lines = data.comparisons.map(c => ({
+        key: c.key, name: c.name,
+        points: series.map(s => [s.ts, s.comparisons[c.key].cumulative_savings]),
+      }));
+      const yMax = Math.max(...lines.flatMap(l => l.points.map(p => p[1])), 1);
+      const yMin = Math.min(...lines.flatMap(l => l.points.map(p => p[1])), 0);
+
+      const sx = t => P.l + ((t - xMin) / (xMax - xMin)) * (W - P.l - P.r);
+      const sy = v => H - P.b - ((v - yMin) / (yMax - yMin)) * (H - P.t - P.b);
+
+      // gridlines
+      const yTicks = 4;
+      let grid = "";
+      for (let i = 0; i <= yTicks; i++) {
+        const v = yMin + ((yMax - yMin) * i) / yTicks;
+        const y = sy(v);
+        grid += `<line x1="${P.l}" y1="${y}" x2="${W - P.r}" y2="${y}" stroke="rgba(61,107,84,0.18)" stroke-width="1"/>`;
+        grid += `<text x="${P.l - 8}" y="${y + 4}" text-anchor="end" fill="#8a948f" font-size="11">$${Math.round(v).toLocaleString()}</text>`;
+      }
+
+      const xTicks = 6;
+      for (let i = 0; i <= xTicks; i++) {
+        const t = xMin + ((xMax - xMin) * i) / xTicks;
+        const x = sx(t);
+        const d = new Date(t * 1000);
+        const label = d.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+        grid += `<text x="${x}" y="${H - 10}" text-anchor="middle" fill="#8a948f" font-size="11">${label}</text>`;
+      }
+
+      const paths = lines.map(l => {
+        const d = l.points.map((p, i) => `${i===0?"M":"L"}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join(" ");
+        const isSel = l.key === SELECTED_KEY;
+        return `<path d="${d}" fill="none" stroke="${COMP_COLORS[l.key]}" stroke-width="${isSel ? 2.5 : 1.5}" opacity="${isSel ? 1 : 0.55}" />`;
+      }).join("");
+
+      const legend = lines.map(l => {
+        const last = l.points[l.points.length - 1][1];
+        return `<span style="display:inline-flex;align-items:center;gap:8px;margin-right:18px;font-size:12px">
+          <span style="width:14px;height:3px;background:${COMP_COLORS[l.key]};display:inline-block"></span>
+          <span class="muted">${l.name}</span>
+          <span class="tnum" style="color:${COMP_COLORS[l.key]}">$${Math.round(last).toLocaleString()}</span>
+        </span>`;
+      }).join("");
+
+      $("chart-wrap").innerHTML = `
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${grid}${paths}</svg>
+        <div style="margin-top:8px">${legend}</div>`;
+    }
+
+    function renderAll() {
+      if (!LAST_DATA) return;
+      const comp = LAST_DATA.comparisons.find(c => c.key === SELECTED_KEY) || LAST_DATA.comparisons[0];
+      renderHeadline(LAST_DATA, comp);
+      renderGarage(LAST_DATA);
+      renderChart(LAST_DATA);
+    }
+
+    async function load() {
+      const r = await fetch("/api/roi");
+      LAST_DATA = await r.json();
+      renderAll();
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      load();
+      $("comp-select").addEventListener("change", e => { SELECTED_KEY = e.target.value; renderAll(); });
+      setInterval(load, 30_000);
+    });
   </script>
 </body>
 </html>

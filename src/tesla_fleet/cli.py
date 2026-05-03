@@ -137,6 +137,38 @@ def monitor(
     asyncio.run(_run())
 
 
+telemetry_app = typer.Typer(no_args_is_help=True, help="Fleet Telemetry streaming")
+app.add_typer(telemetry_app, name="telemetry")
+
+
+@telemetry_app.command("register")
+def telemetry_register(vin: str, hostname: str = typer.Option("")) -> None:
+    """Register a telemetry streaming config for VIN at hostname."""
+    from tesla_fleet import telemetry as t
+
+    async def _run() -> None:
+        client, _ = _client_ctx()
+        async with client:
+            host = hostname or _settings().public_hostname
+            if not host:
+                raise typer.BadParameter("Pass --hostname or set TESLA_PUBLIC_HOSTNAME")
+            typer.echo(json.dumps(await t.register(client, host, vin), indent=2))
+
+    asyncio.run(_run())
+
+
+@telemetry_app.command("unregister")
+def telemetry_unregister(vin: str) -> None:
+    from tesla_fleet import telemetry as t
+
+    async def _run() -> None:
+        client, _ = _client_ctx()
+        async with client:
+            typer.echo(json.dumps(await t.unregister(client, vin), indent=2))
+
+    asyncio.run(_run())
+
+
 @app.command("report")
 def report(roi_state: Path = typer.Option(Path(".roi_state.json"))) -> None:
     """Print the ROI / TCO report from saved state without polling."""

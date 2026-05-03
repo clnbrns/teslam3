@@ -7,11 +7,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from tesla_fleet import db
+from tesla_fleet import db, telemetry
 from tesla_fleet.auth import build_authorize_url
 from tesla_fleet.client import TeslaFleetClient
 from tesla_fleet.config import Settings
@@ -101,6 +101,49 @@ async def cmd(vin: str, name: str, payload: dict | None = None,
         return await client.command(vin, name, payload)
 
 
+# --- Tesla Fleet Telemetry: registration + push ingest ---
+
+@app.post("/api/telemetry/register/{vin}")
+async def telemetry_register(
+    vin: str,
+    hostname: str | None = None,
+    client: TeslaFleetClient = Depends(get_client),
+) -> dict:
+    """Register the streaming telemetry config for a VIN against `hostname`
+    (defaults to settings.public_hostname)."""
+    host = hostname or app.state.settings.public_hostname
+    if not host:
+        raise HTTPException(400, "Set TESLA_PUBLIC_HOSTNAME or pass ?hostname=")
+    async with client:
+        return await telemetry.register(client, host, vin)
+
+
+@app.delete("/api/telemetry/register/{vin}")
+async def telemetry_unregister(
+    vin: str, client: TeslaFleetClient = Depends(get_client)
+) -> dict:
+    async with client:
+        return await telemetry.unregister(client, vin)
+
+
+@app.post("/telemetry")
+async def telemetry_ingest(req: Request) -> dict:
+    """Receive a telemetry payload pushed from Tesla. Idempotent on (vin, ts)."""
+    payload = await req.json()
+    written = telemetry.ingest_payload(payload, default_driver=app.state.settings.default_driver)
+    return {"ok": True, "written": written}
+
+
+@app.get("/.well-known/appspecific/com.tesla.3p.public-key.pem",
+         response_class=PlainTextResponse)
+def public_key() -> str:
+    """Serve the partner public key Tesla validates for command signing."""
+    p = STATIC_DIR / "well-known" / "com.tesla.3p.public-key.pem"
+    if not p.exists():
+        raise HTTPException(404, "public key not yet provisioned")
+    return p.read_text()
+
+
 # --- Dashboard data endpoints ---
 
 MPG_BASELINE = 28.0
@@ -110,8 +153,8 @@ ELEC_PRICE = 0.14
 @app.get("/api/roi")
 def api_roi() -> dict:
     """Lifetime ROI computed per-charging-session against the DFW gas price
-    in effect at the time of that session. Falls back to the simple
-    odometer/kWh totals when no charging history is loaded."""
+    in effect at the time of that session. Compares to multiple ICE vehicles."""
+    from tesla_fleet.comparison_vehicles import COMPARISONS, fuel_price
     from tesla_fleet.gas_prices import DFW_WEEKLY
 
     with db.connect() as conn:
@@ -121,30 +164,49 @@ def api_roi() -> dict:
 
     sample_miles = totals["total_miles"]
     sample_kwh = totals["total_kwh"]
-    # mi/kWh derived from the windowed sample (vehicle-data export period).
     mi_per_kwh = (sample_miles / sample_kwh) if sample_kwh > 0 else 3.5
 
     lifetime_kwh = sum(s["energy_kwh"] for s in sessions)
     lifetime_miles_est = lifetime_kwh * mi_per_kwh
     elec_cost = lifetime_kwh * ELEC_PRICE
 
-    # Per-session gas-equivalent at historical DFW price.
-    gas_cost = 0.0
+    # Per-vehicle running totals.
+    comp_totals: dict[str, float] = {v.key: 0.0 for v in COMPARISONS}
+    cumulative_savings: dict[str, float] = {v.key: 0.0 for v in COMPARISONS}
+    cumulative_elec = 0.0
     series: list[dict] = []
+
     for s in sessions:
         ts = s["end_ts"]
         kwh = s["energy_kwh"]
-        gas_price = price_for(ts)
+        regular_price = price_for(ts)
         miles = kwh * mi_per_kwh
-        gas_for_session = (miles / MPG_BASELINE) * gas_price
-        gas_cost += gas_for_session
+        sess_elec = kwh * ELEC_PRICE
+        cumulative_elec += sess_elec
+
+        per_comp = {}
+        for v in COMPARISONS:
+            gp = fuel_price(ts, v.fuel, regular_price)
+            sess_gas = (miles / v.mpg) * gp
+            comp_totals[v.key] += sess_gas
+            cumulative_savings[v.key] += sess_gas - sess_elec
+            per_comp[v.key] = {
+                "gas_price": gp,
+                "gas_cost": round(sess_gas, 2),
+                "savings": round(sess_gas - sess_elec, 2),
+                "cumulative_savings": round(cumulative_savings[v.key], 2),
+            }
+
         series.append({
             "ts": ts,
+            "date": datetime.fromtimestamp(ts).date().isoformat(),
             "kwh": round(kwh, 2),
-            "gas_price": gas_price,
-            "elec_cost": round(kwh * ELEC_PRICE, 2),
-            "gas_equiv_cost": round(gas_for_session, 2),
+            "miles_est": round(miles, 2),
+            "regular_price": regular_price,
+            "elec_cost": round(sess_elec, 2),
+            "cumulative_elec": round(cumulative_elec, 2),
             "location": s.get("location"),
+            "comparisons": per_comp,
         })
 
     if sample_window[0] and sample_window[1]:
@@ -153,21 +215,40 @@ def api_roi() -> dict:
     else:
         sample_label = "no sample window"
 
+    comparisons = [
+        {
+            "key": v.key,
+            "name": v.name,
+            "mpg": v.mpg,
+            "fuel": v.fuel,
+            "note": v.note,
+            "gas_cost_usd": round(comp_totals[v.key], 2),
+            "savings_usd": round(comp_totals[v.key] - elec_cost, 2),
+        }
+        for v in COMPARISONS
+    ]
+
+    # Default "headline" comparison = first one in the list (generic sedan).
+    headline = comparisons[0]
+
     return {
         "total_miles": round(lifetime_miles_est, 2),
         "total_kwh": round(lifetime_kwh, 3),
-        "gas_equivalent_cost_usd": round(gas_cost, 2),
+        "gas_equivalent_cost_usd": headline["gas_cost_usd"],
         "electric_cost_usd": round(elec_cost, 2),
-        "savings_usd": round(gas_cost - elec_cost, 2),
+        "savings_usd": headline["savings_usd"],
         "sessions": len(sessions),
         "assumptions": {
-            "gas_price_per_gal": round(gas_cost / max(lifetime_miles_est / MPG_BASELINE, 1e-9), 3),
+            "gas_price_per_gal": round(
+                headline["gas_cost_usd"] / max(lifetime_miles_est / headline["mpg"], 1e-9), 3
+            ),
             "gas_price_source": "DFW weekly avg, per-session historical",
-            "mpg_baseline": MPG_BASELINE,
+            "mpg_baseline": headline["mpg"],
             "elec_price_per_kwh": ELEC_PRICE,
             "mi_per_kwh": round(mi_per_kwh, 3),
             "mi_per_kwh_source": sample_label,
         },
+        "comparisons": comparisons,
         "gas_price_history": [{"date": d.isoformat(), "price": p} for d, p in DFW_WEEKLY],
         "sessions_series": series,
     }
