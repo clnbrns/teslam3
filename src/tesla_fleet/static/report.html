@@ -10,7 +10,14 @@
   <nav class="nav">
     <div class="brand">M3 PERFORMANCE</div>
     <a href="/">Dashboard</a>
-    <a href="/report" class="active">Driver</a>
+    <span class="nav-group">
+      <a href="/report" class="active">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
     <a href="/roi">ROI</a>
     <a href="/events">Events</a>
     <div class="spacer"></div>
@@ -120,6 +127,9 @@
       }
     }
     document.addEventListener("DOMContentLoaded", () => {
+      const params = new URLSearchParams(location.search);
+      const d = params.get("driver");
+      if (d) $("driver-input").value = d;
       $("reload").addEventListener("click", load);
       $("driver-input").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
       load();

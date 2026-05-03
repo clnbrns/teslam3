@@ -4,15 +4,18 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from tesla_fleet import db
 from tesla_fleet.auth import build_authorize_url
 from tesla_fleet.client import TeslaFleetClient
 from tesla_fleet.config import Settings
+from tesla_fleet.gas_prices import average_over, price_for
 from tesla_fleet.monitor import RoiState
 from tesla_fleet.tokens import TokenStore, exchange_code
 
@@ -25,6 +28,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 async def lifespan(app: FastAPI):
     app.state.settings = Settings()
     app.state.store = TokenStore(app.state.settings.token_store_path)
+    db.init()
     yield
 
 
@@ -99,23 +103,74 @@ async def cmd(vin: str, name: str, payload: dict | None = None,
 
 # --- Dashboard data endpoints ---
 
+MPG_BASELINE = 28.0
+ELEC_PRICE = 0.14
+
+
 @app.get("/api/roi")
 def api_roi() -> dict:
-    state = RoiState.load(Path(".roi_state.json"))
-    return state.report()
+    """Lifetime ROI computed per-charging-session against the DFW gas price
+    in effect at the time of that session. Falls back to the simple
+    odometer/kWh totals when no charging history is loaded."""
+    from tesla_fleet.gas_prices import DFW_WEEKLY
 
+    with db.connect() as conn:
+        sessions = db.all_charging_sessions(conn)
+        sample_window = db.event_time_window(conn, "driver_sample")
+        totals = db.get_roi(conn)
 
-def _read_events(log_file: str = "monitoring_log.json") -> list[dict]:
-    p = Path(log_file)
-    if not p.exists():
-        return []
-    out = []
-    for line in p.read_text().splitlines():
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    sample_miles = totals["total_miles"]
+    sample_kwh = totals["total_kwh"]
+    # mi/kWh derived from the windowed sample (vehicle-data export period).
+    mi_per_kwh = (sample_miles / sample_kwh) if sample_kwh > 0 else 3.5
+
+    lifetime_kwh = sum(s["energy_kwh"] for s in sessions)
+    lifetime_miles_est = lifetime_kwh * mi_per_kwh
+    elec_cost = lifetime_kwh * ELEC_PRICE
+
+    # Per-session gas-equivalent at historical DFW price.
+    gas_cost = 0.0
+    series: list[dict] = []
+    for s in sessions:
+        ts = s["end_ts"]
+        kwh = s["energy_kwh"]
+        gas_price = price_for(ts)
+        miles = kwh * mi_per_kwh
+        gas_for_session = (miles / MPG_BASELINE) * gas_price
+        gas_cost += gas_for_session
+        series.append({
+            "ts": ts,
+            "kwh": round(kwh, 2),
+            "gas_price": gas_price,
+            "elec_cost": round(kwh * ELEC_PRICE, 2),
+            "gas_equiv_cost": round(gas_for_session, 2),
+            "location": s.get("location"),
+        })
+
+    if sample_window[0] and sample_window[1]:
+        sample_label = (f"sample window {datetime.fromtimestamp(sample_window[0]).date()}"
+                        f" → {datetime.fromtimestamp(sample_window[1]).date()}")
+    else:
+        sample_label = "no sample window"
+
+    return {
+        "total_miles": round(lifetime_miles_est, 2),
+        "total_kwh": round(lifetime_kwh, 3),
+        "gas_equivalent_cost_usd": round(gas_cost, 2),
+        "electric_cost_usd": round(elec_cost, 2),
+        "savings_usd": round(gas_cost - elec_cost, 2),
+        "sessions": len(sessions),
+        "assumptions": {
+            "gas_price_per_gal": round(gas_cost / max(lifetime_miles_est / MPG_BASELINE, 1e-9), 3),
+            "gas_price_source": "DFW weekly avg, per-session historical",
+            "mpg_baseline": MPG_BASELINE,
+            "elec_price_per_kwh": ELEC_PRICE,
+            "mi_per_kwh": round(mi_per_kwh, 3),
+            "mi_per_kwh_source": sample_label,
+        },
+        "gas_price_history": [{"date": d.isoformat(), "price": p} for d, p in DFW_WEEKLY],
+        "sessions_series": series,
+    }
 
 
 @app.get("/api/events")
@@ -123,29 +178,21 @@ def api_events(
     limit: int = 200,
     type: str | None = None,
     driver: str | None = None,
-    log_file: str = "monitoring_log.json",
 ) -> list[dict]:
-    events = _read_events(log_file)
-    if type:
-        events = [e for e in events if e.get("type") == type]
-    if driver:
-        events = [e for e in events if (e.get("driver") or "").lower() == driver.lower()]
-    return list(reversed(events[-limit:]))
+    with db.connect() as conn:
+        return db.read_events(conn, limit=limit, type=type, driver=driver)
 
 
 @app.get("/api/report/{driver}")
-def api_report(driver: str, log_file: str = "monitoring_log.json") -> dict:
+def api_report(driver: str) -> dict:
     """Aggregate driver telemetry into a report-card payload."""
-    events = _read_events(log_file)
-    samples = [
-        e for e in events
-        if e.get("type") == "driver_sample"
-        and (e.get("driver") or "").lower() == driver.lower()
-    ]
+    with db.connect() as conn:
+        samples = db.driver_samples(conn, driver)
     if not samples:
         return {"driver": driver, "samples": 0, "grade": "—", "score": 0, "stats": {}}
 
     speeds = [s["speed_mph"] for s in samples if s.get("speed_mph") is not None]
+    moving = [s for s in samples if (s.get("speed_mph") or 0) > 1]
     over_limit = [
         s for s in samples
         if s.get("speed_mph") is not None and s.get("speed_limit_mph")
@@ -155,8 +202,21 @@ def api_report(driver: str, log_file: str = "monitoring_log.json") -> dict:
     rapid_accels = [s for s in samples if (s.get("event") or {}).get("type") == "rapid_accel"]
 
     timestamps = sorted(s["ts"] for s in samples if "ts" in s)
-    duration_s = (timestamps[-1] - timestamps[0]) if len(timestamps) > 1 else 0
-    miles_est = (sum(speeds) / max(len(speeds), 1)) * (duration_s / 3600) if speeds else 0
+
+    # Drive time + miles: integrate over consecutive moving samples; gaps
+    # over 5 min between samples are treated as a parked break.
+    moving_sorted = sorted(moving, key=lambda s: s["ts"])
+    drive_seconds = 0.0
+    miles_est = 0.0
+    prev = None
+    for s in moving_sorted:
+        if prev is not None:
+            dt = s["ts"] - prev["ts"]
+            if 0 < dt < 300:
+                drive_seconds += dt
+                avg_speed = (s["speed_mph"] + prev["speed_mph"]) / 2
+                miles_est += avg_speed * (dt / 3600)
+        prev = s
 
     # 100-point score: start at 100, deduct.
     score = 100
@@ -184,7 +244,7 @@ def api_report(driver: str, log_file: str = "monitoring_log.json") -> dict:
             "hard_brakes": len(hard_brakes),
             "rapid_accels": len(rapid_accels),
             "over_limit_count": len(over_limit),
-            "duration_minutes": round(duration_s / 60, 1),
+            "duration_minutes": round(drive_seconds / 60, 1),
             "miles_estimate": round(miles_est, 1),
         },
         "recent_incidents": [

@@ -10,7 +10,14 @@
   <nav class="nav">
     <div class="brand">M3 PERFORMANCE</div>
     <a href="/">Dashboard</a>
-    <a href="/report">Driver</a>
+    <span class="nav-group">
+      <a href="/report">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
     <a href="/roi" class="active">ROI</a>
     <a href="/events">Events</a>
     <div class="spacer"></div>
@@ -31,15 +38,16 @@
         <div class="savings-hero">
           <div class="label">Lifetime Savings</div>
           <div class="num positive" id="savings">$0.00</div>
-          <div class="delta">vs. 28 mpg gasoline sedan at $4.39/gal · electric at $0.14/kWh</div>
+          <div class="delta" id="savings-sub">vs. 28 mpg gasoline · DFW historical pricing</div>
         </div>
       </div>
 
       <div class="card col-4">
         <div class="card-label">Totals</div>
-        <div class="card-row"><span class="k">Miles</span><span class="v tnum" id="miles">0</span></div>
+        <div class="card-row"><span class="k">Sessions</span><span class="v tnum" id="sessions">0</span></div>
+        <div class="card-row"><span class="k">Miles (est)</span><span class="v tnum" id="miles">0</span></div>
         <div class="card-row"><span class="k">Energy</span><span class="v tnum" id="kwh">0 kWh</span></div>
-        <div class="card-row"><span class="k">Effective</span><span class="v tnum" id="mi-per-kwh">— mi/kWh</span></div>
+        <div class="card-row"><span class="k">Efficiency</span><span class="v tnum" id="mi-per-kwh">— mi/kWh</span></div>
         <div class="card-row"><span class="k">Cost / mile</span><span class="v tnum" id="cost-per-mi">—</span></div>
       </div>
 
@@ -92,8 +100,14 @@
       sEl.classList.toggle("positive", savings >= 0);
       sEl.classList.toggle("negative", savings < 0);
 
-      $("miles").textContent = fmt(x.total_miles, 1);
-      $("kwh").textContent = `${fmt(x.total_kwh, 2)} kWh`;
+      const sub = $("savings-sub");
+      if (sub && a.gas_price_source) {
+        sub.textContent = `vs. ${a.mpg_baseline} mpg ICE · ${a.gas_price_source} · electric $${a.elec_price_per_kwh}/kWh`;
+      }
+
+      $("sessions").textContent = fmt(x.sessions || 0, 0);
+      $("miles").textContent = fmt(x.total_miles, 0);
+      $("kwh").textContent = `${fmt(x.total_kwh, 1)} kWh`;
       const mipk = x.total_kwh > 0 ? x.total_miles / x.total_kwh : 0;
       $("mi-per-kwh").textContent = mipk ? `${fmt(mipk, 2)} mi/kWh` : "—";
       const cpm = x.total_miles > 0 ? x.electric_cost_usd / x.total_miles : 0;

@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 tesla-fleet = "tesla_fleet.cli:app"
+tesla-fleet-import = "tesla_fleet.importer:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

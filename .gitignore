@@ -10,3 +10,9 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+data/
+monitoring_log.json
+.roi_state.json
+tesla.db
+tesla.db-*
+.DS_Store

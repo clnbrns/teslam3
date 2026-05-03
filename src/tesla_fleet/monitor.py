@@ -103,9 +103,12 @@ class RoiState:
                 # else: session ended, prior peak already accounted for.
             self.last_charge_energy_added = charge_energy_added
 
-    def report(self) -> dict:
-        gas_cost = (self.total_miles / GAS_MPG_BASELINE) * GAS_PRICE_PER_GAL
-        elec_cost = self.total_kwh * ELEC_PRICE_PER_KWH
+    def report(self, gas_price: float = GAS_PRICE_PER_GAL,
+               elec_price: float = ELEC_PRICE_PER_KWH,
+               mpg: float = GAS_MPG_BASELINE,
+               gas_price_label: str = "TX average") -> dict:
+        gas_cost = (self.total_miles / mpg) * gas_price
+        elec_cost = self.total_kwh * elec_price
         savings = gas_cost - elec_cost
         return {
             "total_miles": round(self.total_miles, 2),
@@ -114,9 +117,10 @@ class RoiState:
             "electric_cost_usd": round(elec_cost, 2),
             "savings_usd": round(savings, 2),
             "assumptions": {
-                "gas_price_per_gal": GAS_PRICE_PER_GAL,
-                "mpg_baseline": GAS_MPG_BASELINE,
-                "elec_price_per_kwh": ELEC_PRICE_PER_KWH,
+                "gas_price_per_gal": gas_price,
+                "gas_price_source": gas_price_label,
+                "mpg_baseline": mpg,
+                "elec_price_per_kwh": elec_price,
             },
         }
 
