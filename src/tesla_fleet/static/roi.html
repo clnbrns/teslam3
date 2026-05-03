@@ -47,12 +47,14 @@
       </div>
 
       <div class="card col-4">
-        <div class="card-label">Totals</div>
+        <div class="card-label">Tesla Totals</div>
         <div class="card-row"><span class="k">Sessions</span><span class="v tnum" id="sessions">0</span></div>
         <div class="card-row"><span class="k">Miles (est)</span><span class="v tnum" id="miles">0</span></div>
         <div class="card-row"><span class="k">Energy</span><span class="v tnum" id="kwh">0 kWh</span></div>
         <div class="card-row"><span class="k">Efficiency</span><span class="v tnum" id="mi-per-kwh">— mi/kWh</span></div>
-        <div class="card-row"><span class="k">Cost / mile</span><span class="v tnum" id="cost-per-mi">—</span></div>
+        <div class="card-row"><span class="k">Electricity</span><span class="v tnum" id="cost-elec">—</span></div>
+        <div class="card-row"><span class="k">Maintenance</span><span class="v tnum" id="cost-maint">—</span></div>
+        <div class="card-row"><span class="k">All-in / mile</span><span class="v tnum" id="cost-per-mi">—</span></div>
       </div>
 
       <div class="card col-12">
@@ -113,8 +115,11 @@
 
     function renderHeadline(data, comp) {
       const a = data.assumptions || {};
+      const range = (data.first_session && data.last_session)
+        ? `${new Date(data.first_session*1000).toLocaleDateString(undefined,{month:'short',year:'numeric'})} → ${new Date(data.last_session*1000).toLocaleDateString(undefined,{month:'short',year:'numeric'})}`
+        : "—";
       $("assumptions").textContent =
-        `Lifetime ${data.sessions} sessions · ${fmt(data.total_kwh,1)} kWh · ${a.mi_per_kwh} mi/kWh from ${a.mi_per_kwh_source}`;
+        `2024 Model 3 · ${range} · ${data.sessions} sessions · ${fmt(data.total_kwh,1)} kWh · ${a.mi_per_kwh} mi/kWh from ${a.mi_per_kwh_source}`;
 
       const savings = comp.savings_usd;
       const sEl = $("savings");
@@ -122,30 +127,44 @@
       sEl.classList.toggle("positive", savings >= 0);
       sEl.classList.toggle("negative", savings < 0);
       $("savings-sub").textContent =
-        `vs. ${comp.name} (${comp.mpg} MPG, ${comp.fuel}) · DFW historical · electric $${a.elec_price_per_kwh}/kWh`;
+        `vs. ${comp.name} · fuel + maintenance ($${comp.maint_per_mi.toFixed(2)}/mi ICE vs $${a.tesla_maint_per_mi.toFixed(2)}/mi Tesla) · DFW gas avg historical`;
 
       $("sessions").textContent = fmt(data.sessions, 0);
       $("miles").textContent = fmt(data.total_miles, 0);
       $("kwh").textContent = `${fmt(data.total_kwh, 1)} kWh`;
       const mipk = data.total_kwh > 0 ? data.total_miles / data.total_kwh : 0;
       $("mi-per-kwh").textContent = mipk ? `${fmt(mipk, 2)} mi/kWh` : "—";
-      const cpm = data.total_miles > 0 ? data.electric_cost_usd / data.total_miles : 0;
+      $("cost-elec").textContent = `$${fmt(data.electric_cost_usd, 0)}`;
+      $("cost-maint").textContent = `$${fmt(data.tesla_maint_cost_usd, 0)}`;
+      const cpm = data.total_miles > 0 ? data.tesla_total_cost_usd / data.total_miles : 0;
       $("cost-per-mi").textContent = cpm ? `$${fmt(cpm, 3)}` : "—";
 
-      // Comparison bars for selected vehicle
-      const max = Math.max(comp.gas_cost_usd || 0, data.electric_cost_usd || 0, 1);
-      const gasPct = (comp.gas_cost_usd / max) * 100;
-      const elecPct = (data.electric_cost_usd / max) * 100;
+      // Stacked fuel + maintenance bars for selected ICE vs. Tesla.
+      const iceTotal = comp.ice_total_usd, teslaTotal = data.tesla_total_cost_usd;
+      const max = Math.max(iceTotal, teslaTotal, 1);
+      const pct = (n) => (n / max) * 100;
+      const c = COMP_COLORS[comp.key];
       $("compare").innerHTML = `
         <div class="compare-row gas">
           <span class="lbl">${comp.name.split(' ').slice(0,3).join(' ')}</span>
-          <div class="bar"><div style="width:${gasPct}%;background:${COMP_COLORS[comp.key]}"></div></div>
-          <span class="amt">$${fmt(comp.gas_cost_usd, 2)}</span>
+          <div class="bar" style="display:flex">
+            <div title="Fuel" style="width:${pct(comp.gas_cost_usd)}%;background:${c}"></div>
+            <div title="Maintenance" style="width:${pct(comp.maint_cost_usd)}%;background:${c};opacity:0.5"></div>
+          </div>
+          <span class="amt">$${fmt(iceTotal, 0)}</span>
         </div>
         <div class="compare-row elec">
-          <span class="lbl">Model 3 (Electric)</span>
-          <div class="bar"><div style="width:${elecPct}%"></div></div>
-          <span class="amt">$${fmt(data.electric_cost_usd, 2)}</span>
+          <span class="lbl">Model 3</span>
+          <div class="bar" style="display:flex">
+            <div title="Electricity" style="width:${pct(data.electric_cost_usd)}%"></div>
+            <div title="Maintenance" style="width:${pct(data.tesla_maint_cost_usd)}%;background:var(--matte-green-soft);opacity:0.5"></div>
+          </div>
+          <span class="amt">$${fmt(teslaTotal, 0)}</span>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:8px">
+          Solid = fuel/electricity · faded = scheduled maintenance.
+          ICE: $${fmt(comp.gas_cost_usd,0)} fuel + $${fmt(comp.maint_cost_usd,0)} maint.
+          Tesla: $${fmt(data.electric_cost_usd,0)} elec + $${fmt(data.tesla_maint_cost_usd,0)} maint.
         </div>`;
 
       // Equivalents — based on selected comparison
@@ -173,9 +192,12 @@
           <div class="k">${c.name}</div>
           <div class="v tnum" style="font-size:24px">$${fmt(c.savings_usd, 0)}</div>
           <div class="muted" style="font-size:11px;margin-top:4px">
-            ${c.mpg} MPG · ${c.fuel} · gas would've cost <b>$${fmt(c.gas_cost_usd,0)}</b>
+            ${c.mpg} MPG · ${c.fuel} · $${c.maint_per_mi.toFixed(2)}/mi maint
           </div>
-          <div class="muted" style="font-size:11px;margin-top:2px">${c.note}</div>`;
+          <div class="muted" style="font-size:11px;margin-top:2px">
+            Fuel <b>$${fmt(c.gas_cost_usd,0)}</b> + maint <b>$${fmt(c.maint_cost_usd,0)}</b> = $${fmt(c.ice_total_usd,0)}
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:2px;font-style:italic">${c.note}</div>`;
         div.onclick = () => { SELECTED_KEY = c.key; renderAll(); };
         garage.appendChild(div);
       }
