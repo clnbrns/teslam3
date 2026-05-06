@@ -132,6 +132,7 @@ function start() {
   timer = setInterval(tick, POLL_MS);
 }
 
+window.refresh = tick;
 document.addEventListener("DOMContentLoaded", () => {
   const saved = localStorage.getItem(VIN_KEY);
   if (saved) { $("vin").value = saved; start(); }

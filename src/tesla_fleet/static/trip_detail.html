@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Goblin M3P · Trip</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<style>
+  #trip-map { height: 360px; border-radius: 8px; background: var(--carbon-2); }
+  .trip-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 800px) { .trip-stats { grid-template-columns: repeat(2, 1fr); } }
+  .trip-stats .stat { background: var(--carbon-2); border: 1px solid var(--matte-green-line);
+                      border-radius: 6px; padding: 14px; }
+  .trip-stats .v { font-size: 26px; font-variant-numeric: tabular-nums; }
+  .speed-chart svg { width: 100%; height: 200px; display: block; }
+  .incidents li {
+    display: grid; grid-template-columns: 90px 100px 1fr;
+    gap: 12px; padding: 10px 0;
+    border-bottom: 1px solid var(--matte-green-line); font-size: 13px;
+  }
+  .incidents li.brake .tag { color: var(--caliper-red); }
+  .incidents li.accel .tag { color: #d97a3d; }
+</style>
+</head>
+<body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
+  <nav class="nav">
+    <div class="brand">GOBLIN M3P</div>
+    <a href="/">Dashboard</a>
+    <span class="nav-group">
+      <a href="/report">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
+    <a href="/fsd">FSD</a>
+    <a href="/attention">Attention</a>
+    <a href="/charging">Charging</a>
+    <a href="/trips" class="active">Trips</a>
+    <a href="/map">Map</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <a href="/trips" class="status-dot online">← back</a>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow"><a href="/trips" class="muted">Trips</a> / Detail</div>
+        <h1 id="title">Trip</h1>
+        <div class="sub" id="when">—</div>
+      </div>
+    </div>
+
+    <section class="grid">
+      <div class="card col-12">
+        <div class="trip-stats">
+          <div class="stat"><div class="k">Miles</div><div class="v" id="miles">—</div></div>
+          <div class="stat"><div class="k">Avg / Max Speed</div><div class="v" id="speeds">—</div></div>
+          <div class="stat"><div class="k">Battery Used</div><div class="v" id="battery">—</div></div>
+          <div class="stat" style="border-left:2px solid var(--matte-green-soft)">
+            <div class="k">Trip Cost</div><div class="v" id="cost">—</div>
+            <div class="muted" style="font-size:11px;margin-top:4px" id="cost-detail">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card col-12" id="map-card">
+        <div class="card-label">Route</div>
+        <div id="trip-map" style="margin-top:10px"></div>
+        <div class="muted" id="map-note" style="font-size:12px;margin-top:8px;display:none">
+          No GPS captured for this trip — re-OAuth with the <code>vehicle_location</code> scope to start logging route data.
+        </div>
+      </div>
+
+      <div class="card col-12" id="speed-card" style="display:none">
+        <div class="card-label">Speed Over Time</div>
+        <div class="speed-chart" id="speed-chart" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card col-12" id="incidents-card" style="display:none">
+        <div class="card-label">Incidents</div>
+        <ul class="events incidents" id="incidents" style="max-height:none"></ul>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n, d=0) => (n == null) ? "—" :
+      Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+    function renderSpeedChart(speeds) {
+      if (!speeds.length) { $("speed-card").style.display = "none"; return; }
+      $("speed-card").style.display = "";
+      const W = 1200, H = 200, P = { l: 50, r: 20, t: 10, b: 30 };
+      const ts = speeds.map(s => s.ts);
+      const mph = speeds.map(s => s.mph);
+      const xMin = Math.min(...ts), xMax = Math.max(...ts);
+      const yMax = Math.max(...mph, 1);
+      const sx = (t) => P.l + ((t - xMin) / Math.max(xMax - xMin, 1)) * (W - P.l - P.r);
+      const sy = (v) => H - P.b - (v / yMax) * (H - P.t - P.b);
+      let svg = "";
+      for (let i = 0; i <= 4; i++) {
+        const v = (yMax * i) / 4;
+        const y = sy(v);
+        svg += `<line x1="${P.l}" y1="${y}" x2="${W-P.r}" y2="${y}" stroke="rgba(61,107,84,0.18)"/>`;
+        svg += `<text x="${P.l-6}" y="${y+4}" text-anchor="end" fill="#8a948f" font-size="11">${Math.round(v)}</text>`;
+      }
+      const d = speeds.map((s, i) => `${i?'L':'M'}${sx(s.ts).toFixed(1)},${sy(s.mph).toFixed(1)}`).join(" ");
+      svg += `<path d="${d}" fill="none" stroke="var(--matte-green-soft)" stroke-width="2"/>`;
+      $("speed-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}">${svg}</svg>`;
+    }
+
+    function renderIncidents(incidents) {
+      if (!incidents.length) { $("incidents-card").style.display = "none"; return; }
+      $("incidents-card").style.display = "";
+      const ul = $("incidents");
+      ul.innerHTML = incidents.map(i => {
+        const cls = i.type === "hard_brake" ? "brake" : "accel";
+        const tag = i.type === "hard_brake" ? "Hard brake" : "Rapid accel";
+        const time = new Date(i.ts*1000).toLocaleTimeString();
+        const map = i.maps_url ? ` · <a href="${i.maps_url}" target="_blank" rel="noopener">map</a>` : "";
+        return `<li class="${cls}">
+          <span class="ts">${time}</span>
+          <span class="tag">${tag}</span>
+          <span class="body">${i.speed_mph ?? "—"} mph <span class="muted">Δ ${i.delta_mph_per_s} mph/s${map}</span></span>
+        </li>`;
+      }).join("");
+    }
+
+    const HEAT_GRADIENT = {
+      0.05: "#c8232c",
+      0.30: "#d97a3d",
+      0.55: "#c9a227",
+      0.80: "#5d8a4f",
+      1.00: "#3d6b54",
+    };
+
+    function renderMap(gps, allHistory) {
+      const map = L.map("trip-map", { attributionControl: true })
+        .setView([32.7555, -97.3308], 11);  // DFW default
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap',
+      }).addTo(map);
+
+      // Cumulative heatmap (red = least, green = most) underneath the route.
+      if (allHistory && allHistory.length && typeof L.heatLayer === "function") {
+        L.heatLayer(allHistory.map(p => [p.lat, p.lon, 1.0]), {
+          radius: 18, blur: 16, maxZoom: 17,
+          gradient: HEAT_GRADIENT, minOpacity: 0.25,
+        }).addTo(map);
+      }
+
+      if (!gps.length) {
+        $("map-note").style.display = "";
+        if (allHistory && allHistory.length) {
+          map.fitBounds(allHistory.map(p => [p.lat, p.lon]), { padding: [30, 30] });
+        }
+        return;
+      }
+      const latlngs = gps.map(p => [p.lat, p.lon]);
+      L.polyline(latlngs, { color: "#c8232c", weight: 4, opacity: 0.9 }).addTo(map);
+      L.circleMarker(latlngs[0], { radius: 6, color: "#3d6b54", fillOpacity: 1 })
+        .addTo(map).bindTooltip("Start");
+      L.circleMarker(latlngs[latlngs.length - 1], { radius: 6, color: "#c8232c", fillOpacity: 1 })
+        .addTo(map).bindTooltip("End");
+      map.fitBounds(latlngs, { padding: [30, 30] });
+    }
+
+    async function load() {
+      const params = new URLSearchParams(location.search);
+      const startTs = parseInt(params.get("start"), 10);
+      if (!startTs) { $("title").textContent = "Pick a trip from the list"; return; }
+
+      const [r, hr] = await Promise.all([
+        fetch(`/api/trip/${startTs}`),
+        fetch("/api/gps/all?limit=10000").catch(() => null),
+      ]);
+      const t = await r.json();
+      const history = hr ? (await hr.json()).points : [];
+
+      const start = new Date(t.start_ts*1000);
+      $("title").textContent = `Trip · ${start.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'})}`;
+      $("when").textContent =
+        `${start.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} – ${
+          new Date(t.end_ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+        }${t.driver ? ` · ${t.driver}` : ""}`;
+
+      $("miles").textContent = fmt(t.miles, 1);
+      $("speeds").textContent = `${fmt(t.avg_speed_mph,0)} / ${fmt(t.max_speed_mph,0)} mph`;
+      $("battery").textContent = t.battery_used_pct != null ? `${t.battery_used_pct}%` : "—";
+      if (t.cost) {
+        $("cost").textContent = `$${fmt(t.cost.total_usd, 2)}`;
+        $("cost-detail").textContent =
+          `$${fmt(t.cost.electricity_usd,2)} elec + $${fmt(t.cost.tire_wear_usd,2)} tires`;
+      } else {
+        $("cost").textContent = "—";
+        $("cost-detail").textContent = "—";
+      }
+
+      // Wait for Leaflet to be ready
+      const tryRender = () => {
+        if (typeof L === "undefined") return setTimeout(tryRender, 50);
+        renderMap(t.gps || [], history);
+      };
+      tryRender();
+
+      renderSpeedChart(t.speeds || []);
+      renderIncidents(t.incidents || []);
+    }
+
+    document.addEventListener("DOMContentLoaded", load);
+  </script>
+</body>
+</html>

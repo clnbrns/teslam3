@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Fleet · ROI</title>
+<title>Goblin M3P · ROI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
 </head>
 <body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
   <nav class="nav">
-    <div class="brand">M3 PERFORMANCE</div>
+    <div class="brand">GOBLIN M3P</div>
     <a href="/">Dashboard</a>
     <span class="nav-group">
       <a href="/report">Driver</a>
@@ -18,6 +20,11 @@
         <a href="/report?driver=Carson">Carson</a>
       </span>
     </span>
+    <a href="/fsd">FSD</a>
+    <a href="/attention">Attention</a>
+    <a href="/charging">Charging</a>
+    <a href="/trips">Trips</a>
+    <a href="/map">Map</a>
     <a href="/roi" class="active">ROI</a>
     <a href="/events">Events</a>
     <div class="spacer"></div>
@@ -53,7 +60,8 @@
         <div class="card-row"><span class="k">Energy</span><span class="v tnum" id="kwh">0 kWh</span></div>
         <div class="card-row"><span class="k">Efficiency</span><span class="v tnum" id="mi-per-kwh">— mi/kWh</span></div>
         <div class="card-row"><span class="k">Electricity</span><span class="v tnum" id="cost-elec">—</span></div>
-        <div class="card-row"><span class="k">Maintenance</span><span class="v tnum" id="cost-maint">—</span></div>
+        <div class="card-row"><span class="k">Per-mile maint</span><span class="v tnum" id="cost-maint">—</span></div>
+        <div class="card-row"><span class="k">One-off expenses</span><span class="v tnum" id="cost-infra">—</span></div>
         <div class="card-row"><span class="k">All-in / mile</span><span class="v tnum" id="cost-per-mi">—</span></div>
       </div>
 
@@ -63,16 +71,33 @@
       </div>
 
       <div class="card col-12">
-        <div class="card-label">Cumulative Savings Over Time</div>
+        <div class="card-label">Cumulative Savings Over Time · Currently-Owned Garage</div>
         <div id="chart-wrap" style="margin-top:12px"></div>
         <div class="muted" style="margin-top:8px;font-size:12px">
-          Each line shows cumulative dollars saved by driving the Model 3 instead of that ICE, priced at the DFW gas average for the week of each charging session.
+          Compares the Model 3 vs. the two vehicles currently in the household: a sedan baseline and Lindsey's Defender. Other historical vehicles still appear in the Garage tiles above for context.
         </div>
       </div>
 
       <div class="card col-12">
         <div class="card-label">Cost Comparison · Selected Vehicle</div>
         <div id="compare" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Tracked One-Off Expenses</div>
+        <div class="muted" style="font-size:12px;margin:6px 0 12px">
+          Real-money receipts beyond the per-mile maintenance estimate. Rolled into the headline savings.
+        </div>
+        <div id="expenses"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Electric Bill Allocation by Driver</div>
+        <div class="muted" style="font-size:12px;margin:6px 0 12px">
+          Splits the lifetime electricity cost by each driver's share of telemetry samples.
+          Useful for fair "you owe me $X" math at the end of the month.
+        </div>
+        <div id="per-driver" style="margin-top:8px"></div>
       </div>
 
       <div class="card col-12">
@@ -108,10 +133,15 @@
       generic_sedan: "#8a948f",
       bronco_wildtrak_2dr: "#c8232c",
       defender_110_3l: "#3d6b54",
+      bmw_m3_2015: "#4a90d9",
+      lexus_lx470_2006: "#c9a227",
+      model3_2019_lr: "#a06bd9",
+      tahoe_z71_2024: "#d97a3d",
+      f250_67ho_2026: "#3a6090",   // Ford "Antimatter Blue"
     };
 
     let LAST_DATA = null;
-    let SELECTED_KEY = "bronco_wildtrak_2dr";
+    let SELECTED_KEY = "lexus_lx470_2006";  // most dramatic default
 
     function renderHeadline(data, comp) {
       const a = data.assumptions || {};
@@ -136,8 +166,26 @@
       $("mi-per-kwh").textContent = mipk ? `${fmt(mipk, 2)} mi/kWh` : "—";
       $("cost-elec").textContent = `$${fmt(data.electric_cost_usd, 0)}`;
       $("cost-maint").textContent = `$${fmt(data.tesla_maint_cost_usd, 0)}`;
+      $("cost-infra").textContent = `$${fmt(data.tesla_one_off_cost_usd, 0)}`;
       const cpm = data.total_miles > 0 ? data.tesla_total_cost_usd / data.total_miles : 0;
       $("cost-per-mi").textContent = cpm ? `$${fmt(cpm, 3)}` : "—";
+
+      // Expenses table
+      const ex = document.getElementById("expenses");
+      const rows = (data.tesla_one_off_expenses || []).slice().sort((a,b) => a.date.localeCompare(b.date));
+      ex.innerHTML = rows.length ? rows.map(e => `
+        <div class="card-row">
+          <span class="k" style="text-transform:none;letter-spacing:0;color:var(--text)">
+            <span style="color:var(--text-dim);font-size:11px;letter-spacing:0.1em;text-transform:uppercase;">${e.date}</span>
+            &nbsp;${e.label}
+            <span style="color:var(--text-dim);font-size:11px;margin-left:6px;font-style:italic">${e.category}</span>
+          </span>
+          <span class="v tnum">$${fmt(e.amount, 2)}</span>
+        </div>`).join("") + `
+        <div class="card-row" style="border-top:1px solid var(--matte-green-soft);margin-top:6px">
+          <span class="k" style="color:var(--text)">Total one-off expenses</span>
+          <span class="v tnum" style="color:var(--matte-green-soft)">$${fmt(data.tesla_one_off_cost_usd, 2)}</span>
+        </div>` : '<div class="muted">No expenses recorded.</div>';
 
       // Stacked fuel + maintenance bars for selected ICE vs. Tesla.
       const iceTotal = comp.ice_total_usd, teslaTotal = data.tesla_total_cost_usd;
@@ -219,10 +267,14 @@
       const W = 1200, H = 260, P = { l: 60, r: 20, t: 10, b: 30 };
       const ts = series.map(s => s.ts);
       const xMin = Math.min(...ts), xMax = Math.max(...ts);
-      const lines = data.comparisons.map(c => ({
-        key: c.key, name: c.name,
-        points: series.map(s => [s.ts, s.comparisons[c.key].cumulative_savings]),
-      }));
+      // Chart only includes vehicles still owned in the household.
+      const CHART_KEYS = new Set(["generic_sedan", "defender_110_3l"]);
+      const lines = data.comparisons
+        .filter(c => CHART_KEYS.has(c.key))
+        .map(c => ({
+          key: c.key, name: c.name,
+          points: series.map(s => [s.ts, s.comparisons[c.key].cumulative_savings]),
+        }));
       const yMax = Math.max(...lines.flatMap(l => l.points.map(p => p[1])), 1);
       const yMin = Math.min(...lines.flatMap(l => l.points.map(p => p[1])), 0);
 
@@ -276,11 +328,29 @@
       renderChart(LAST_DATA);
     }
 
+    async function loadPerDriver() {
+      const r = await fetch("/api/per-driver-cost");
+      const d = await r.json();
+      const el = document.getElementById("per-driver");
+      if (!d.drivers || !d.drivers.length) { el.innerHTML = '<div class="muted">No driver attribution yet.</div>'; return; }
+      const max = Math.max(...d.drivers.map(x => x.cost_usd), 1);
+      const colors = { Colin: "#4a90d9", Lindsey: "#c9a227", Carson: "#c8232c" };
+      el.innerHTML = d.drivers.map(x => `
+        <div class="compare-row">
+          <span class="lbl">${x.driver}</span>
+          <div class="bar"><div style="width:${(x.cost_usd/max)*100}%;background:${colors[x.driver] || "#8a948f"}"></div></div>
+          <span class="amt">$${fmt(x.cost_usd, 2)} <span class="muted" style="font-size:11px">· ${x.share_pct}% · ${fmt(x.miles,0)} mi</span></span>
+        </div>`).join("");
+    }
+
     async function load() {
       const r = await fetch("/api/roi");
       LAST_DATA = await r.json();
       renderAll();
+      loadPerDriver();
     }
+
+    window.refresh = (typeof load === "function") ? load : null;
 
     document.addEventListener("DOMContentLoaded", () => {
       load();

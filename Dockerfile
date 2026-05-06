@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+# Cache-bust marker — bump on big static-asset changes
+ARG BUILD_REV=2026-05-04-mobile-pass
+
 WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ ./src/

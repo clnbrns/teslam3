@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Goblin M3P · Map</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
+<!-- Leaflet must load BEFORE leaflet.heat (the plugin extends L on import). -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<style>
+  #all-map { height: 70vh; min-height: 480px; border-radius: 8px; background: var(--carbon-2); }
+  body.mobile #all-map { height: calc(100vh - 220px); min-height: 360px; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-top: 10px; align-items: center; }
+  .legend .swatch { width: 14px; height: 3px; display: inline-block; margin-right: 6px; vertical-align: middle; }
+  .heat-bar {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 11px; letter-spacing: 0.06em;
+  }
+  .heat-bar .scale {
+    width: 140px; height: 8px; border-radius: 4px;
+    background: linear-gradient(to right, #c8232c 0%, #d97a3d 30%, #c9a227 55%, #3d6b54 100%);
+  }
+  .map-toggle {
+    display: inline-flex; gap: 6px;
+    background: var(--carbon-2); border: 1px solid var(--matte-green-line);
+    border-radius: 6px; padding: 3px;
+  }
+  .map-toggle button {
+    background: transparent; border: 0; color: var(--text-dim);
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    padding: 6px 12px; cursor: pointer; border-radius: 4px;
+  }
+  .map-toggle button.active { background: var(--matte-green); color: var(--text); }
+</style>
+</head>
+<body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
+  <nav class="nav">
+    <div class="brand">GOBLIN M3P</div>
+    <a href="/">Dashboard</a>
+    <span class="nav-group">
+      <a href="/report">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
+    <a href="/fsd">FSD</a>
+    <a href="/attention">Attention</a>
+    <a href="/charging">Charging</a>
+    <a href="/trips">Trips</a>
+    <a href="/map" class="active">Map</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span class="status-dot online" id="count-pill">— pts</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Cumulative Drive History</div>
+        <h1>Map</h1>
+        <div class="sub" id="sub">Where the car has been</div>
+      </div>
+    </div>
+
+    <section class="grid">
+      <div class="card col-12">
+        <div style="display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+          <span class="heat-bar muted">
+            Less driven
+            <span class="scale" aria-hidden="true"></span>
+            More driven
+          </span>
+        </div>
+        <div id="all-map"></div>
+        <div class="legend">
+          <span><span class="swatch" style="background:#c8232c;width:10px;height:10px;border-radius:50%"></span>Latest position</span>
+          <span class="muted" style="margin-left:auto">Tiles &copy; OpenStreetMap</span>
+        </div>
+        <div class="muted" id="empty-note" style="font-size:13px;margin-top:14px;display:none;line-height:1.5">
+          <strong>No GPS points logged yet.</strong> Tesla's data export omits coordinates,
+          so the historical 1,164 sessions don't have them. After you re-OAuth at
+          <code>tesla.burnsbuilt.co/login</code> with the <code>vehicle_location</code> scope,
+          every poll captures lat/lon. Points accumulate as the car is driven.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // Red = least visited, green = most visited.
+    // Leaflet.heat treats `intensity` as 0..1; we scale by point density.
+    const HEAT_GRADIENT = {
+      0.05: "#c8232c",  // red — rare
+      0.30: "#d97a3d",  // orange
+      0.55: "#c9a227",  // yellow
+      0.80: "#5d8a4f",  // light green
+      1.00: "#3d6b54",  // matte green — frequent
+    };
+
+    let heatLayer = null;
+
+    function renderMap(points) {
+      const map = L.map("all-map").setView([32.7555, -97.3308], 10);  // DFW
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap',
+      }).addTo(map);
+      if (!points.length) {
+        $("empty-note").style.display = "";
+        $("count-pill").textContent = "0 pts";
+        $("sub").textContent = "Awaiting GPS";
+        return map;
+      }
+
+      // Group points into "drive sessions" — > 5 min gap = new path.
+      const sessions = [];
+      let cur = [];
+      let lastTs = 0;
+      for (const p of points) {
+        if (lastTs && p.ts - lastTs > 300) {
+          if (cur.length > 1) sessions.push(cur);
+          cur = [];
+        }
+        cur.push(p);
+        lastTs = p.ts;
+      }
+      if (cur.length > 1) sessions.push(cur);
+
+      // Tuned so individual GPS points paint visibly even at DFW-wide zoom.
+      // `max: 1.0` keeps every single sample at full intensity; clusters then
+      // climb toward the green end of the gradient as density builds.
+      const HEAT_OPTS = {
+        radius: 28, blur: 22,
+        maxZoom: 17, max: 1.0,
+        minOpacity: 0.55,
+        gradient: HEAT_GRADIENT,
+      };
+      const heatPoints = points.map(p => [p.lat, p.lon, 1.0]);
+      if (typeof L.heatLayer === "function") {
+        heatLayer = L.heatLayer(heatPoints, HEAT_OPTS);
+      }
+
+      // Compute bounds for fitBounds
+      const all = points.map(p => [p.lat, p.lon]);
+
+      // Latest point always visible (red dot)
+      const last = points[points.length - 1];
+      L.circleMarker([last.lat, last.lon], {
+        radius: 8, color: "#c8232c", fillColor: "#c8232c", fillOpacity: 1,
+      }).addTo(map).bindTooltip("Latest");
+
+      // Add heat to the map (whether created above or after lazy-load)
+      const addHeat = () => { if (heatLayer) heatLayer.addTo(map); };
+      addHeat();
+      if (all.length) map.fitBounds(all, { padding: [40, 40] });
+
+      // If leaflet.heat hadn't loaded when we tried earlier, retry once it does.
+      if (!heatLayer) {
+        const waitHeat = () => {
+          if (typeof L.heatLayer === "function") {
+            heatLayer = L.heatLayer(heatPoints, HEAT_OPTS);
+            heatLayer.addTo(map);
+          } else {
+            setTimeout(waitHeat, 100);
+          }
+        };
+        waitHeat();
+      }
+
+      $("count-pill").textContent = `${points.length.toLocaleString()} pts`;
+      $("sub").textContent = `${points.length.toLocaleString()} GPS points across ${sessions.length} session${sessions.length>1?"s":""}`;
+      return map;
+    }
+
+    async function loadEnforcement(map) {
+      try {
+        const r = await fetch("/api/enforcement");
+        if (!r.ok) return;
+        const e = await r.json();
+        const cameraGroup = L.layerGroup();
+        const schoolGroup = L.layerGroup();
+        const calmingGroup = L.layerGroup();
+        for (const f of e.features || []) {
+          if (f.kind === "camera") {
+            L.circleMarker([f.lat, f.lon], {
+              radius: 7, color: "#ffffff", fillColor: "#c8232c",
+              fillOpacity: 1, weight: 2,
+            }).addTo(cameraGroup).bindTooltip(`📷 ${f.name || "Speed camera"}${f.limit_mph?` · ${f.limit_mph} mph`:""}`);
+          } else if (f.kind === "school") {
+            L.circleMarker([f.lat, f.lon], {
+              radius: 5, color: "#c9a227", fillColor: "#c9a227",
+              fillOpacity: 0.7, weight: 1,
+            }).addTo(schoolGroup).bindTooltip(`🏫 ${f.name || "School"}`);
+          } else if (f.kind === "calming") {
+            L.circleMarker([f.lat, f.lon], {
+              radius: 3, color: "#d97a3d", fillColor: "#d97a3d",
+              fillOpacity: 0.8, weight: 0,
+            }).addTo(calmingGroup).bindTooltip("Speed bump / calming");
+          }
+        }
+        const overlays = {};
+        if (e.by_kind?.camera)  overlays[`📷 Cameras (${e.by_kind.camera})`]   = cameraGroup.addTo(map);
+        if (e.by_kind?.school)  overlays[`🏫 Schools (${e.by_kind.school})`]    = schoolGroup.addTo(map);
+        if (e.by_kind?.calming) overlays[`Speed bumps (${e.by_kind.calming})`] = calmingGroup;
+        if (Object.keys(overlays).length) L.control.layers(null, overlays, {collapsed: false}).addTo(map);
+      } catch (err) { console.warn("enforcement", err); }
+    }
+
+    async function load() {
+      const r = await fetch("/api/gps/all?limit=10000");
+      const d = await r.json();
+      const tryRender = () => {
+        if (typeof L === "undefined") return setTimeout(tryRender, 50);
+        const map = renderMap(d.points || []);
+        if (map) loadEnforcement(map);
+      };
+      tryRender();
+    }
+    window.refresh = load;
+    document.addEventListener("DOMContentLoaded", load);
+  </script>
+</body>
+</html>

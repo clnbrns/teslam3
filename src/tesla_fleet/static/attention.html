@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Goblin M3P · Attention</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
+<style>
+  .attn-grade {
+    width: 90px; height: 90px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 48px; font-weight: 200; letter-spacing: -0.04em;
+    background: linear-gradient(135deg, var(--matte-green), var(--matte-green-deep));
+    border: 1px solid var(--matte-green-soft); color: var(--text);
+  }
+  .attn-grade.bad { background: linear-gradient(135deg, var(--caliper-red-dim), #2a0508);
+                    border-color: var(--caliper-red); }
+  .kind-row {
+    display: grid; grid-template-columns: 110px 1fr 60px;
+    gap: 12px; align-items: center; padding: 8px 0;
+    border-bottom: 1px solid var(--matte-green-line); font-size: 13px;
+  }
+  .kind-row:last-child { border-bottom: 0; }
+  .kind-row .kind { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+                    color: var(--text-dim); }
+  .kind-row .bar { height: 8px; background: var(--carbon-4); border-radius: 4px; overflow: hidden; }
+  .kind-row .bar > div { height: 100%; transition: width 0.5s; }
+  .kind-row .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+  .kind-row.gaze_away  .bar > div { background: var(--goblin-yellow, #d9b13a); }
+  .kind-row.phone_use  .bar > div { background: var(--caliper-red); }
+  .kind-row.drowsy     .bar > div { background: #ff7b00; }
+  .kind-row.inattentive .bar > div { background: var(--matte-green-soft); }
+  .verify {
+    display: inline-block; padding: 2px 8px;
+    background: var(--matte-green-deep); color: var(--text);
+    font-size: 11px; letter-spacing: 0.08em; border-radius: 3px;
+    border: 1px solid var(--matte-green-soft);
+  }
+  .verify.mismatch { background: var(--caliper-red-dim); border-color: var(--caliper-red); }
+</style>
+</head>
+<body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
+  <nav class="nav">
+    <div class="brand">GOBLIN M3P</div>
+    <a href="/">Dashboard</a>
+    <span class="nav-group">
+      <a href="/report">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
+    <a href="/fsd">FSD</a>
+    <a href="/attention" class="active">Attention</a>
+    <a href="/charging">Charging</a>
+    <a href="/trips">Trips</a>
+    <a href="/map">Map</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span class="status-dot online">Cabin Cam</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Cabin Camera · Tesla SW 2026.8</div>
+        <h1>Driver Attentiveness</h1>
+        <div class="sub" id="window">—</div>
+      </div>
+    </div>
+
+    <div class="card col-12" id="empty-banner" style="display:none; padding:32px; text-align:center">
+      <div class="card-label">No data yet</div>
+      <div style="margin-top:12px; max-width:560px; margin-left:auto; margin-right:auto; font-size:14px; color:var(--text-dim); line-height:1.6">
+        The cabin-camera attentiveness fields ship with Tesla SW <b>2026.8</b>.
+        Once your car has the OTA update and telemetry streaming is registered
+        (<code>tesla-fleet telemetry register &lt;vin&gt;</code>),
+        gaze, phone-use, and face-verified driver data will populate here in real time.
+      </div>
+    </div>
+
+    <section id="grid" class="grid"></section>
+
+    <section id="mismatch-section" class="grid" style="margin-top:16px; display:none">
+      <div class="card col-12">
+        <div class="card-label">Driver Verification Mismatches</div>
+        <div class="muted" style="font-size:12px;margin:6px 0 12px">
+          Cabin-cam face ID disagreed with the active phone key. Common reasons:
+          phone left in another driver's pocket, factory key fob shared, or a teen
+          driving while parent's phone is in the car.
+        </div>
+        <ul id="mismatch-list" class="events" style="max-height:none"></ul>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n) => Number(n || 0).toLocaleString();
+
+    function driverCard(d) {
+      const total = d.events || 1;
+      const kindRow = (kind, label) => {
+        const n = d.by_kind[kind] || 0;
+        const pct = (n / total) * 100;
+        const dur = d.avg_durations[kind];
+        return `<div class="kind-row ${kind}">
+          <span class="kind">${label}</span>
+          <div class="bar"><div style="width:${pct}%"></div></div>
+          <span class="n">${fmt(n)}${dur ? `<span class="muted" style="font-size:11px"> · ${dur}s avg</span>` : ""}</span>
+        </div>`;
+      };
+
+      return `
+      <div class="card col-6" style="border-left:3px solid var(--caliper-red); padding:24px">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px">
+          <div>
+            <div class="card-label">Verified Driver</div>
+            <div style="font-size:32px; font-weight:600; letter-spacing:-0.02em; margin-top:4px">${d.driver}</div>
+            <div class="muted" style="font-size:13px; margin-top:4px">${fmt(d.events)} attention events recorded</div>
+          </div>
+          <div style="text-align:center">
+            <div class="card-label">Score</div>
+            <div class="attn-grade ${d.attention_score < 80 ? 'bad' : ''}">${d.grade}</div>
+            <div class="muted" style="font-size:11px; margin-top:6px; font-variant-numeric:tabular-nums">${d.attention_score}/100</div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px">
+          ${kindRow("gaze_away",   "Gaze Away")}
+          ${kindRow("phone_use",   "Phone Use")}
+          ${kindRow("drowsy",      "Drowsy")}
+          ${kindRow("inattentive", "Inattentive")}
+        </div>
+      </div>`;
+    }
+
+    async function load() {
+      const r = await fetch("/api/attention");
+      const d = await r.json();
+      const grid = $("grid");
+
+      if (!d.drivers || !d.drivers.length) {
+        $("empty-banner").style.display = "";
+        $("window").textContent = "Awaiting cabin-camera telemetry";
+        return;
+      }
+      $("empty-banner").style.display = "none";
+      grid.innerHTML = d.drivers.map(driverCard).join("");
+      const totalEvents = d.drivers.reduce((s,x) => s + x.events, 0);
+      $("window").textContent =
+        `${fmt(totalEvents)} events across ${d.drivers.length} driver${d.drivers.length>1?'s':''}`;
+
+      const ml = $("mismatch-list");
+      const mismatches = d.verification_mismatches || [];
+      if (mismatches.length) {
+        $("mismatch-section").style.display = "";
+        ml.innerHTML = mismatches.map(m => `
+          <li>
+            <span class="ts">${fmt(m.n)}×</span>
+            <span class="tag">SWAP</span>
+            <span class="body">
+              Phone key said <span class="verify mismatch">${m.expected}</span>
+              but cabin cam saw <span class="verify">${m.actual}</span>
+            </span>
+          </li>`).join("");
+      } else {
+        $("mismatch-section").style.display = "none";
+      }
+    }
+    window.refresh = (typeof load === "function") ? load : null;
+    document.addEventListener("DOMContentLoaded", () => { load(); setInterval(load, 30_000); });
+  </script>
+</body>
+</html>

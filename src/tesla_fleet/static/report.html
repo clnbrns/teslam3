@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Fleet · Driver Report</title>
+<title>Goblin M3P · Driver Report</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
 </head>
 <body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
   <nav class="nav">
-    <div class="brand">M3 PERFORMANCE</div>
+    <div class="brand">GOBLIN M3P</div>
     <a href="/">Dashboard</a>
     <span class="nav-group">
       <a href="/report" class="active">Driver</a>
@@ -18,6 +20,11 @@
         <a href="/report?driver=Carson">Carson</a>
       </span>
     </span>
+    <a href="/fsd">FSD</a>
+    <a href="/attention">Attention</a>
+    <a href="/charging">Charging</a>
+    <a href="/trips">Trips</a>
+    <a href="/map">Map</a>
     <a href="/roi">ROI</a>
     <a href="/events">Events</a>
     <div class="spacer"></div>
@@ -126,6 +133,7 @@
         ul.appendChild(li);
       }
     }
+    window.refresh = (typeof load === "function") ? load : null;
     document.addEventListener("DOMContentLoaded", () => {
       const params = new URLSearchParams(location.search);
       const d = params.get("driver");

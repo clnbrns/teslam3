@@ -169,6 +169,58 @@ def telemetry_unregister(vin: str) -> None:
     asyncio.run(_run())
 
 
+@app.command("seed-attention")
+def seed_attention(
+    vin: str = typer.Option("5YJ3E1ETXRF901558"),
+    days: int = typer.Option(7),
+) -> None:
+    """Generate plausible cabin-camera attention events for the last N days.
+
+    Useful to demo the /attention dashboard before Tesla SW 2026.8 telemetry
+    actually starts flowing. Idempotent — re-runs replace nothing on PK conflict.
+    """
+    import random
+    import time
+    from tesla_fleet import db
+
+    random.seed(42)
+    db.init()
+    now = time.time()
+    written = 0
+    profiles = [
+        # (driver, gaze_per_day, phone_per_day, drowsy_per_day, score_target)
+        ("Colin",   2,  0,  0,  "A"),  # uses FSD heavily; eyes on road
+        ("Carson",  6,  3,  0,  "C"),  # phone occasionally
+        ("Lindsey", 4,  1,  1,  "B"),
+    ]
+    with db.connect() as conn:
+        for driver, gz, ph, dr, _ in profiles:
+            for d in range(days):
+                base = now - (d * 86_400) - random.randint(0, 30_000)
+                for kind, count in (("gaze_away", gz), ("phone_use", ph), ("drowsy", dr)):
+                    for i in range(random.randint(max(0, count - 2), count + 2)):
+                        ev = {
+                            "vin": vin, "ts": base + (i * 137) + random.uniform(0, 3.0),
+                            "driver": driver, "verified_driver": driver, "kind": kind,
+                            "duration_s": round(random.uniform(1.5, 6.0), 1),
+                            "severity": random.choice(["low", "low", "medium", "high"]),
+                            "speed_mph": round(random.uniform(20, 75), 1),
+                            "payload": {"source": "seed-attention", "synthetic": True},
+                        }
+                        if db.record_attention(conn, ev):
+                            written += 1
+        # One verification mismatch to demonstrate the panel.
+        for i in range(3):
+            ev = {
+                "vin": vin, "ts": now - (i * 3600), "driver": "Colin",
+                "verified_driver": "Carson", "kind": "driver_swap",
+                "speed_mph": 12.0,
+                "payload": {"source": "seed-attention"},
+            }
+            db.record_attention(conn, ev)
+    typer.echo(f"Wrote {written} synthetic attention events")
+
+
 @app.command("report")
 def report(roi_state: Path = typer.Option(Path(".roi_state.json"))) -> None:
     """Print the ROI / TCO report from saved state without polling."""

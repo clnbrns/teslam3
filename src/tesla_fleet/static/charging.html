@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Goblin M3P · Charging</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
+<style>
+  .loc-row { display: grid; grid-template-columns: 110px 1fr 110px;
+             gap: 14px; align-items: center; padding: 10px 0;
+             border-bottom: 1px solid var(--matte-green-line); }
+  .loc-row:last-child { border-bottom: 0; }
+  .loc-row .lbl { font-size: 12px; letter-spacing: 0.12em;
+                  text-transform: uppercase; color: var(--text-dim); }
+  .loc-row .bar { height: 18px; background: var(--carbon-4); border-radius: 4px; overflow: hidden; }
+  .loc-row .bar > div { height: 100%; transition: width 0.5s ease; }
+  .loc-row .amt { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .home   .bar > div { background: var(--matte-green-soft); }
+  .away   .bar > div { background: #c9a227; }
+  .super  .bar > div { background: var(--caliper-red); }
+  .other  .bar > div { background: var(--text-dim); }
+  .l1     .bar > div { background: #4a90d9; }
+  .l2     .bar > div { background: var(--matte-green-soft); }
+  .dc     .bar > div { background: var(--caliper-red); }
+</style>
+</head>
+<body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
+  <nav class="nav">
+    <div class="brand">GOBLIN M3P</div>
+    <a href="/">Dashboard</a>
+    <span class="nav-group">
+      <a href="/report">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
+    <a href="/fsd">FSD</a>
+    <a href="/attention">Attention</a>
+    <a href="/charging" class="active">Charging</a>
+    <a href="/trips">Trips</a>
+    <a href="/map">Map</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span class="status-dot online" id="count">—</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Energy</div>
+        <h1>Charging Patterns &amp; Efficiency</h1>
+        <div class="sub" id="sub">—</div>
+      </div>
+    </div>
+
+    <section class="grid">
+      <div class="card col-4">
+        <div class="card-label">Lifetime Totals</div>
+        <div class="card-row"><span class="k">Sessions</span><span class="v tnum" id="t-sessions">0</span></div>
+        <div class="card-row"><span class="k">Energy</span><span class="v tnum" id="t-kwh">0 kWh</span></div>
+        <div class="card-row"><span class="k">Electricity Cost</span><span class="v tnum" id="t-cost">$0</span></div>
+        <div class="card-row"><span class="k">Avg Session</span><span class="v tnum" id="t-avg">— kWh</span></div>
+      </div>
+
+      <div class="card col-4">
+        <div class="card-label">By Location</div>
+        <div id="by-location" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card col-4">
+        <div class="card-label">By Charger Type</div>
+        <div id="by-charger" style="margin-top:8px"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Charging Speed Distribution</div>
+        <div class="muted" style="font-size:12px;margin:6px 0 12px">
+          Average kW per session, bucketed. DC fast charging is rare — most of your energy comes from L2 home charging.
+        </div>
+        <div id="speed-dist"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Weekly Charging &amp; Estimated Miles Driven</div>
+        <div class="muted" style="font-size:12px;margin:6px 0 12px">
+          kWh added per ISO week. Miles est. = kWh × <span id="mi-per-kwh">—</span> mi/kWh (lifetime).
+          Seasonality (winter heating loss) will surface once live telemetry streams weekly odometer.
+        </div>
+        <div id="weekly-chart"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n, d=0) => (n == null) ? "—" :
+      Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+    function renderBar(rowKey, items, units, cls) {
+      if (!items || !items.length) return `<div class="muted">No data.</div>`;
+      const max = Math.max(...items.map(i => i.kwh || 0), 1);
+      return items.map(i => `
+        <div class="loc-row ${cls(i.key)}">
+          <span class="lbl">${i.key}</span>
+          <div class="bar"><div style="width:${(i.kwh/max)*100}%"></div></div>
+          <span class="amt">${fmt(i.kwh,0)} kWh<br><span class="muted" style="font-size:11px">${i.sessions} sess</span></span>
+        </div>`).join("");
+    }
+
+    function locClass(k) {
+      const x = (k||"").toLowerCase();
+      if (x.includes("home")) return "home";
+      if (x.includes("supercharg")) return "super";
+      if (x.includes("away")) return "away";
+      return "other";
+    }
+    function chargerClass(k) {
+      const x = (k||"").toLowerCase();
+      if (x.includes("supercharg") || x.includes("dc")) return "dc";
+      if (x.includes("wall") || x.includes("destination") || x.includes("gen 2") || x.includes("mobile")) return "l2";
+      return "l1";
+    }
+
+    function renderSpeedDist(rows) {
+      const max = Math.max(...rows.map(r => r.kwh || 0), 1);
+      $("speed-dist").innerHTML = rows.map(r => `
+        <div class="loc-row l2">
+          <span class="lbl">${r.bucket}</span>
+          <div class="bar"><div style="width:${(r.kwh/max)*100}%"></div></div>
+          <span class="amt">${fmt(r.kwh,0)} kWh<br><span class="muted" style="font-size:11px">${r.sessions} sess · avg ${r.avg_kw} kW</span></span>
+        </div>`).join("");
+    }
+
+    function renderWeekly(rows) {
+      if (!rows.length) { $("weekly-chart").innerHTML = '<div class="empty">No charging history.</div>'; return; }
+      const W = 1200, H = 200, P = { l: 50, r: 20, t: 10, b: 30 };
+      const max = Math.max(...rows.map(r => r.kwh), 1);
+      const bw = (W - P.l - P.r) / rows.length * 0.85;
+
+      let svg = "";
+      for (let i = 0; i <= 4; i++) {
+        const v = (max * i) / 4;
+        const y = H - P.b - ((H - P.t - P.b) * i / 4);
+        svg += `<line x1="${P.l}" y1="${y}" x2="${W - P.r}" y2="${y}" stroke="rgba(61,107,84,0.18)"/>`;
+        svg += `<text x="${P.l - 6}" y="${y + 4}" text-anchor="end" fill="#8a948f" font-size="11">${Math.round(v)}</text>`;
+      }
+      rows.forEach((r, i) => {
+        const x = P.l + i * (W - P.l - P.r) / rows.length + 2;
+        const h = (r.kwh / max) * (H - P.t - P.b);
+        const y = H - P.b - h;
+        svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="var(--matte-green-soft)" opacity="0.85">
+          <title>${r.week} · ${r.kwh} kWh · ~${r.miles_est} mi · ${r.sessions} sessions</title></rect>`;
+      });
+      // X-axis labels every ~6 weeks
+      const stride = Math.max(1, Math.floor(rows.length / 8));
+      rows.forEach((r, i) => {
+        if (i % stride !== 0) return;
+        const x = P.l + i * (W - P.l - P.r) / rows.length + bw / 2;
+        svg += `<text x="${x}" y="${H - 10}" text-anchor="middle" fill="#8a948f" font-size="10">${r.week.replace(/^\d+-/, '')}</text>`;
+      });
+      $("weekly-chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${svg}</svg>`;
+    }
+
+    async function load() {
+      const [c, e] = await Promise.all([
+        fetch("/api/charging").then(r => r.json()),
+        fetch("/api/efficiency").then(r => r.json()),
+      ]);
+
+      $("t-sessions").textContent = fmt(c.sessions, 0);
+      $("t-kwh").textContent = `${fmt(c.total_kwh, 1)} kWh`;
+      $("t-cost").textContent = `$${fmt(c.total_cost, 2)}`;
+      $("t-avg").textContent = c.sessions ? `${fmt(c.total_kwh / c.sessions, 1)} kWh` : "—";
+      $("count").textContent = `${c.sessions} sessions`;
+      $("sub").textContent = `${fmt(c.total_kwh, 0)} kWh charged across ${c.sessions} sessions · electricity cost $${fmt(c.total_cost, 0)}`;
+
+      $("by-location").innerHTML = renderBar("loc", c.by_location, "kWh", locClass);
+      $("by-charger").innerHTML = renderBar("ch", c.by_charger, "kWh", chargerClass);
+      renderSpeedDist(c.speed_distribution || []);
+      $("mi-per-kwh").textContent = e.lifetime_mi_per_kwh ?? "—";
+      renderWeekly(e.weekly || []);
+    }
+    window.refresh = (typeof load === "function") ? load : null;
+    document.addEventListener("DOMContentLoaded", () => { load(); setInterval(load, 60_000); });
+  </script>
+</body>
+</html>

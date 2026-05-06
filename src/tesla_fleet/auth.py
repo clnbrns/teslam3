@@ -16,5 +16,8 @@ def build_authorize_url(settings: Settings, state: str | None = None) -> tuple[s
         "scope": settings.scopes,
         "state": state,
         "audience": settings.audience,
+        # Force re-consent so newly-added scopes (e.g. vehicle_location) are
+        # actually granted instead of Tesla silently re-issuing the prior token.
+        "prompt": "login consent",
     }
     return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}", state

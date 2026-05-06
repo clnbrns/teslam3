@@ -47,6 +47,24 @@ ODO_COL = "Odometer (Kilometers)"
 GEAR_COL = "Gear Selection"
 KEY_COL = "Identity of the Active Key Device"
 DATE_COL = "DATE (UTC)"
+AP_STATE_COL = (
+    "Autopilot State (Unavailable is recorded when Autopilot is not "
+    "available, SNA is recorded when system state is not available)"
+)
+ACCEL_MODE_COL = "UI Setting - Acceleration Mode"
+STEERING_MODE_COL = "UI Setting - Steering Mode"
+STOPPING_MODE_COL = "UI Setting - Stopping Mode "  # trailing space is in the CSV header
+NAV_ON_AP_COL = "UI Setting - Navigate on Autopilot"
+
+
+def _normalize_state(raw: str | None, *, drop_prefix: str = "") -> str | None:
+    """Strip Tesla's enum prefixes, e.g. 'STEERING_TUNE_STANDARD' → 'STANDARD'."""
+    if not raw:
+        return None
+    s = raw.strip()
+    if drop_prefix and s.startswith(drop_prefix):
+        s = s[len(drop_prefix):]
+    return s or None
 
 
 def _split_state_value(cell: str) -> tuple[str | None, float | None]:
@@ -82,6 +100,7 @@ class ImportStats:
     files: int = 0
     rows: int = 0
     samples: int = 0
+    fsd_samples: int = 0
     hard_brakes: int = 0
     rapid_accels: int = 0
     miles: float = 0.0
@@ -162,9 +181,16 @@ def process_vehicle_csv(
     """Stream a daily CSV and emit driver_sample events + miles driven."""
     stats = ImportStats(files=1)
     out: list[dict] = []
+    fsd_out: list[dict] = []
     miles_driven = 0.0
     last_odo_km: float | None = None
     current_driver: str | None = None  # carry forward — keys only log at session start
+    # FSD/profile fields are also sparse — carry forward.
+    cur_ap_state: str | None = None
+    cur_accel: str | None = None
+    cur_steering: str | None = None
+    cur_stopping: str | None = None
+    cur_nav_on_ap: int | None = None
 
     with csv_path.open(newline="") as f:
         for row in csv.DictReader(f):
@@ -178,6 +204,24 @@ def process_vehicle_csv(
             _, odo_km = _split_state_value(row.get(ODO_COL, ""))
             gear, _ = _split_state_value(row.get(GEAR_COL, ""))
             _, key_val = _split_state_value(row.get(KEY_COL, ""))
+
+            # FSD / profile fields — split out the state portion.
+            ap_state, _ = _split_state_value(row.get(AP_STATE_COL, ""))
+            accel_mode, _ = _split_state_value(row.get(ACCEL_MODE_COL, ""))
+            steering_mode, _ = _split_state_value(row.get(STEERING_MODE_COL, ""))
+            stopping_mode, _ = _split_state_value(row.get(STOPPING_MODE_COL, ""))
+            nav_on_ap_state, _ = _split_state_value(row.get(NAV_ON_AP_COL, ""))
+
+            if ap_state and ap_state != "SNA":
+                cur_ap_state = ap_state
+            if accel_mode:
+                cur_accel = accel_mode
+            if steering_mode:
+                cur_steering = _normalize_state(steering_mode, drop_prefix="STEERING_TUNE_")
+            if stopping_mode:
+                cur_stopping = stopping_mode
+            if nav_on_ap_state:
+                cur_nav_on_ap = 1 if nav_on_ap_state.upper() in {"ON", "ENABLED", "1"} else 0
 
             # Odometer-based mileage (most accurate).
             if odo_km is not None:
@@ -229,8 +273,23 @@ def process_vehicle_csv(
                 })
                 stats.samples += 1
 
+                # FSD profile snapshot — only emit while the car is being driven,
+                # so settings idle in the parking lot don't dominate the totals.
+                if cur_ap_state:
+                    fsd_out.append({
+                        "vin": row.get("VIN", "").strip(),
+                        "ts": ts,
+                        "driver": driver,
+                        "ap_state": cur_ap_state,
+                        "accel_mode": cur_accel,
+                        "steering_mode": cur_steering,
+                        "stopping_mode": cur_stopping,
+                        "nav_on_ap": cur_nav_on_ap,
+                    })
+                    stats.fsd_samples += 1
+
     stats.miles = miles_driven
-    return out, miles_driven, stats
+    return out, fsd_out, miles_driven, stats
 
 
 def downsample(events: list[dict], every: float = 30.0) -> list[dict]:
@@ -267,14 +326,17 @@ def run_import(
 
     total = ImportStats()
     all_events: list[dict] = []
+    all_fsd: list[dict] = []
 
     for csv_path in iter_vehicle_csvs(root):
         logger.info("Processing %s", csv_path.name)
-        events, miles, stats = process_vehicle_csv(csv_path, key_map)
+        events, fsd, miles, stats = process_vehicle_csv(csv_path, key_map)
         all_events.extend(events)
+        all_fsd.extend(fsd)
         total.files += stats.files
         total.rows += stats.rows
         total.samples += stats.samples
+        total.fsd_samples += stats.fsd_samples
         total.hard_brakes += stats.hard_brakes
         total.rapid_accels += stats.rapid_accels
         total.miles += miles
@@ -322,6 +384,8 @@ def run_import(
         for ch in charging_events:
             ch_with_vin = {**ch, "vin": ch.get("vin", "")}
             db.record_charging(conn, ch_with_vin)
+        for f in all_fsd:
+            db.record_fsd(conn, f)
         db.set_roi_totals(conn, vin="", total_miles=state.total_miles,
                           total_kwh=state.total_kwh)
         conn.execute("COMMIT")
@@ -361,6 +425,7 @@ def main() -> None:
     print(f"  files          {stats.files}")
     print(f"  rows scanned   {stats.rows:,}")
     print(f"  samples kept   {stats.samples:,}")
+    print(f"  fsd samples    {stats.fsd_samples:,}")
     print(f"  hard brakes    {stats.hard_brakes}")
     print(f"  rapid accels   {stats.rapid_accels}")
     print(f"  miles driven   {stats.miles:,.1f}")

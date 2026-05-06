@@ -51,6 +51,13 @@ TELEMETRY_FIELDS: dict[str, dict[str, Any]] = {
     # Driving dynamics — used for brake/accel detection on the server side.
     "AcceleratorPedalPosition":  {"interval_seconds": 1},
     "BrakePedalPosition":        {"interval_seconds": 1},
+    # Tesla SW 2026.8+ cabin-camera fields. Field names are best-effort —
+    # rename to match Tesla's actual telemetry spec once confirmed.
+    "CabinCameraDriverProfile":  {"interval_seconds": 30},   # face-verified driver
+    "DriverGazeAway":            {"interval_seconds": 1, "minimum_delta": 1},
+    "DriverPhoneUse":            {"interval_seconds": 1, "minimum_delta": 1},
+    "DriverDrowsy":              {"interval_seconds": 5},
+    "DriverInattentive":         {"interval_seconds": 1},
 }
 
 HARD_BRAKE_MPHS = -7.0
@@ -75,13 +82,15 @@ async def register(client: TeslaFleetClient, hostname: str, vin: str) -> dict:
     """Push the telemetry config to Tesla. Idempotent — overwrites prior config."""
     body = build_config(hostname, vin)
     return await client._request(
-        "POST", f"/api/1/vehicles/{vin}/fleet_telemetry_config", json=body
+        "POST", "/api/1/vehicles/fleet_telemetry_config_create", json=body
     )
 
 
 async def unregister(client: TeslaFleetClient, vin: str) -> dict:
     """Disable streaming for a VIN (back to polling-only)."""
-    return await client._request("DELETE", f"/api/1/vehicles/{vin}/fleet_telemetry_config")
+    return await client._request(
+        "DELETE", f"/api/1/vehicles/{vin}/fleet_telemetry_config",
+    )
 
 
 # -----------------------------------------------------------------------
@@ -166,6 +175,14 @@ def ingest_payload(payload: dict, *, default_driver: str | None = None) -> int:
     lon = (location or {}).get("longitude") if isinstance(location, dict) else None
     gear = by_key.get("Gear")  # "P" / "R" / "N" / "D"
 
+    # SW 2026.8 cabin-camera signals.
+    verified_driver = by_key.get("CabinCameraDriverProfile")
+    attention_kinds = []
+    if by_key.get("DriverGazeAway"):    attention_kinds.append(("gaze_away",  by_key.get("DriverGazeAway")))
+    if by_key.get("DriverPhoneUse"):    attention_kinds.append(("phone_use",  by_key.get("DriverPhoneUse")))
+    if by_key.get("DriverDrowsy"):      attention_kinds.append(("drowsy",     by_key.get("DriverDrowsy")))
+    if by_key.get("DriverInattentive"): attention_kinds.append(("inattentive",by_key.get("DriverInattentive")))
+
     event = _tracker(vin).detect(speed_mph, sample_ts)
     record = {
         "type": "driver_sample",
@@ -185,6 +202,20 @@ def ingest_payload(payload: dict, *, default_driver: str | None = None) -> int:
     with db.connect() as conn:
         if db.record_event(conn, record):
             written += 1
+        # SW 2026.8: persist face-verified driver + any inattentiveness flags.
+        for kind, raw in attention_kinds:
+            attn = {
+                "vin": vin, "ts": sample_ts,
+                "driver": default_driver,
+                "verified_driver": verified_driver or default_driver,
+                "kind": kind,
+                "duration_s": (raw or {}).get("duration_s") if isinstance(raw, dict) else None,
+                "severity":   (raw or {}).get("severity")   if isinstance(raw, dict) else None,
+                "speed_mph": speed_mph,
+                "payload": raw,
+            }
+            if db.record_attention(conn, attn):
+                written += 1
         # Update ROI from odometer + charge-energy keys when present.
         odo_mi = by_key.get("Odometer")
         charge_kwh = by_key.get("ACChargingEnergyIn") or by_key.get("DCChargingEnergyIn")

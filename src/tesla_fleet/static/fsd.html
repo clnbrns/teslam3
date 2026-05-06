@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Goblin M3P · FSD</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260505-091219" />
+<style>
+  /* FSD-specific extras */
+  .fsd-bar { display: flex; height: 22px; border-radius: 4px; overflow: hidden;
+             background: var(--carbon-4); margin-top: 6px; }
+  .fsd-bar > div { transition: width 0.5s ease; }
+  .fsd-bar .fsd { background: var(--caliper-red); }
+  .fsd-bar .ap  { background: var(--matte-green-soft); }
+  .fsd-bar .av  { background: var(--carbon-4); }
+  .fsd-bar .un  { background: #2a1a14; }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-dim);
+            margin-top: 8px; flex-wrap: wrap; letter-spacing: 0.06em; }
+  .legend .swatch { width: 10px; height: 10px; display: inline-block; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+  .profile-pill {
+    display: inline-block; padding: 4px 10px;
+    background: var(--carbon-2); border: 1px solid var(--matte-green-line);
+    border-radius: 12px; font-size: 11px; letter-spacing: 0.08em;
+    margin: 2px 4px 2px 0; color: var(--text);
+  }
+  .profile-pill.dom { background: var(--matte-green-deep); border-color: var(--matte-green-soft); color: #fff; }
+  .profile-pill.red { border-color: var(--caliper-red-dim); color: var(--caliper-red); }
+  .profile-row { margin-top: 12px; }
+  .profile-row .k { font-size: 11px; letter-spacing: 0.16em;
+                    text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+  .driver-card { padding: 24px; }
+  .driver-card h2 { margin: 0 0 4px; font-weight: 600; letter-spacing: -0.02em; font-size: 28px; }
+  .pct-display { display: flex; align-items: baseline; gap: 8px; }
+  .pct-display .num { font-size: 48px; font-weight: 300; letter-spacing: -0.04em; line-height: 1;
+                      font-variant-numeric: tabular-nums; color: var(--caliper-red); }
+  .pct-display .lbl { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
+                      color: var(--text-dim); }
+</style>
+</head>
+<body>
+  <script src="/static/nav.js?v=20260505-091219" defer></script>
+  <script src="/static/mobile.js?v=20260505-091219" defer></script>
+  <nav class="nav">
+    <div class="brand">GOBLIN M3P</div>
+    <a href="/">Dashboard</a>
+    <span class="nav-group">
+      <a href="/report">Driver</a>
+      <span class="nav-menu">
+        <a href="/report?driver=Colin">Colin</a>
+        <a href="/report?driver=Lindsey">Lindsey</a>
+        <a href="/report?driver=Carson">Carson</a>
+      </span>
+    </span>
+    <a href="/fsd" class="active">FSD</a>
+    <a href="/attention">Attention</a>
+    <a href="/charging">Charging</a>
+    <a href="/trips">Trips</a>
+    <a href="/map">Map</a>
+    <a href="/roi">ROI</a>
+    <a href="/events">Events</a>
+    <div class="spacer"></div>
+    <span id="status-pill" class="status-dot online">FSD Usage</span>
+  </nav>
+
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">Full Self-Driving · Autopilot</div>
+        <h1>FSD Usage by Driver</h1>
+        <div class="sub" id="window">—</div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--caliper-red)"></span>FSD engaged</span>
+      <span><span class="swatch" style="background:var(--matte-green-soft)"></span>Autopilot engaged</span>
+      <span><span class="swatch" style="background:var(--carbon-4)"></span>Available, not engaged</span>
+      <span><span class="swatch" style="background:#2a1a14"></span>Unavailable (parked / city street)</span>
+    </div>
+
+    <section id="grid" class="grid" style="margin-top:24px"></section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fmt = (n, d=0) => (n == null || Number.isNaN(n)) ? "—"
+      : Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+    function profilePills(arr, redKey) {
+      if (!arr || !arr.length) return '<span class="muted">—</span>';
+      return arr.map((p, i) => {
+        const cls = i === 0 ? "dom" : "";
+        const color = (redKey && p.key.toLowerCase().includes(redKey)) ? "red" : "";
+        return `<span class="profile-pill ${cls} ${color}">${p.key} · ${p.pct}%</span>`;
+      }).join("");
+    }
+
+    function driverCard(d) {
+      const total = d.engaged_samples + d.available_samples + d.unavailable_samples || 1;
+      const pctFsd = (d.fsd_samples / total) * 100;
+      const pctAp = (d.ap_samples / total) * 100;
+      const pctAv = (d.available_samples / total) * 100;
+      const pctUn = (d.unavailable_samples / total) * 100;
+
+      return `
+      <div class="card col-12 driver-card" style="border-left:3px solid var(--caliper-red)">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:24px; flex-wrap:wrap">
+          <div>
+            <div class="card-label">Driver</div>
+            <h2>${d.driver}</h2>
+            <div class="muted" style="font-size:13px">${fmt(d.samples,0)} drive samples</div>
+          </div>
+          <div>
+            <div class="card-label">FSD Engagement</div>
+            <div class="pct-display">
+              <span class="num">${fmt(d.engagement_pct, 1)}<span style="font-size:24px">%</span></span>
+              <span class="lbl">when available</span>
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:6px">
+              ${fmt(d.engaged_samples,0)} engaged samples / ${fmt(d.engaged_samples + d.available_samples,0)} eligible
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-row">
+          <div class="k">Autopilot State Mix</div>
+          <div class="fsd-bar">
+            <div class="fsd" style="width:${pctFsd}%" title="FSD engaged ${pctFsd.toFixed(1)}%"></div>
+            <div class="ap"  style="width:${pctAp}%"  title="Autopilot engaged ${pctAp.toFixed(1)}%"></div>
+            <div class="av"  style="width:${pctAv}%"  title="Available ${pctAv.toFixed(1)}%"></div>
+            <div class="un"  style="width:${pctUn}%"  title="Unavailable ${pctUn.toFixed(1)}%"></div>
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:6px;font-variant-numeric:tabular-nums">
+            FSD ${fmt(d.fsd_samples,0)} · AP ${fmt(d.ap_samples,0)} · Available ${fmt(d.available_samples,0)} · Unavailable ${fmt(d.unavailable_samples,0)}
+          </div>
+        </div>
+
+        <div class="profile-row">
+          <div class="k">Acceleration Mode (driver profile)</div>
+          ${profilePills(d.accel_top, "performance")}
+        </div>
+        <div class="profile-row">
+          <div class="k">Steering Mode</div>
+          ${profilePills(d.steering_top, "sport")}
+        </div>
+        <div class="profile-row">
+          <div class="k">Stopping Mode</div>
+          ${profilePills(d.stopping_top)}
+        </div>
+      </div>`;
+    }
+
+    async function load() {
+      const r = await fetch("/api/fsd");
+      const d = await r.json();
+      const grid = $("grid");
+      if (!d.drivers || !d.drivers.length) {
+        grid.innerHTML = `<div class="card col-12 empty">No FSD samples recorded yet.</div>`;
+        $("window").textContent = "No data";
+        return;
+      }
+      grid.innerHTML = d.drivers.map(driverCard).join("");
+      const totalEngaged = d.drivers.reduce((s, x) => s + x.engaged_samples, 0);
+      const totalSamples = d.drivers.reduce((s, x) => s + x.samples, 0);
+      $("window").textContent =
+        `${fmt(totalSamples, 0)} samples across ${d.drivers.length} drivers · ${fmt(totalEngaged, 0)} engaged`;
+    }
+    window.refresh = (typeof load === "function") ? load : null;
+    document.addEventListener("DOMContentLoaded", () => { load(); setInterval(load, 30_000); });
+  </script>
+</body>
+</html>

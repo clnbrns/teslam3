@@ -6,7 +6,7 @@ dockerfilePath = "Dockerfile"
 startCommand = "sh -c 'mkdir -p /data && uvicorn tesla_fleet.api:app --host 0.0.0.0 --port ${PORT:-8080}'"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-healthcheckPath = "/api/roi"
+healthcheckPath = "/healthz"
 healthcheckTimeout = 30
 
 # Persistent volume for SQLite + token store.

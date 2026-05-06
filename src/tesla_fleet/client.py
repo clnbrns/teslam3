@@ -49,8 +49,31 @@ class TeslaFleetClient:
         data = await self._request("GET", f"/api/1/vehicles/{vin}")
         return data.get("response", {})
 
-    async def vehicle_data(self, vin: str) -> dict:
-        data = await self._request("GET", f"/api/1/vehicles/{vin}/vehicle_data")
+    async def vehicle_data(self, vin: str, *, fresh: bool = True) -> dict:
+        """Get current vehicle data. ``fresh=True`` requests every endpoint
+        explicitly which forces Tesla to bypass its short-lived cache and
+        fetch directly from the car — necessary to see live drive telemetry.
+        """
+        path = f"/api/1/vehicles/{vin}/vehicle_data"
+        if fresh:
+            # Includes `location_data` once the user has re-OAuth'd with the
+            # `vehicle_location` scope. If they haven't, Tesla returns 403 and
+            # we transparently fall back to the no-location subset.
+            path += (
+                "?endpoints="
+                "charge_state%3Bclimate_state%3Bclosures_state%3B"
+                "drive_state%3Bgui_settings%3Blocation_data%3B"
+                "vehicle_config%3Bvehicle_state"
+            )
+        try:
+            data = await self._request("GET", path)
+        except httpx.HTTPStatusError as e:
+            if fresh and e.response.status_code == 403 and "location" in path:
+                # Retry without location_data — user hasn't approved that scope yet.
+                fallback = path.replace("location_data%3B", "")
+                data = await self._request("GET", fallback)
+            else:
+                raise
         return data.get("response", {})
 
     async def wake_up(self, vin: str) -> dict:
