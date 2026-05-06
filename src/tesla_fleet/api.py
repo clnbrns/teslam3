@@ -221,6 +221,13 @@ async def set_active_driver(req: Request) -> dict:
 
 
 @app.get("/", response_class=HTMLResponse)
+def index() -> FileResponse:
+    # Map is the landing page; the legacy live-status dashboard is hidden
+    # but still reachable at /dashboard for ad-hoc debugging.
+    return FileResponse(STATIC_DIR / "map.html")
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
 def dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "dashboard.html")
 
