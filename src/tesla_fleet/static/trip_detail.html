@@ -4,12 +4,20 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Trip</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260507-130148" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260507-130437" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <style>
-  #trip-map { height: 360px; border-radius: 8px; background: var(--carbon-2); }
+  #trip-map {
+    height: 420px;
+    width: 100%;
+    border-radius: 8px;
+    background: var(--carbon-2);
+    position: relative;
+    z-index: 0;
+  }
+  body.mobile #trip-map { height: 320px; }
   .trip-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
   @media (max-width: 800px) { .trip-stats { grid-template-columns: repeat(2, 1fr); } }
   .trip-stats .stat { background: var(--carbon-2); border: 1px solid var(--matte-green-line);
@@ -26,8 +34,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260507-130148" defer></script>
-  <script src="/static/mobile.js?v=20260507-130148" defer></script>
+  <script src="/static/nav.js?v=20260507-130437" defer></script>
+  <script src="/static/mobile.js?v=20260507-130437" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -150,6 +158,13 @@
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap',
       }).addTo(map);
+
+      // Force Leaflet to recompute container size + reload tiles. Without
+      // this the map's measurement of its container can be 0×0 if its
+      // parent card hadn't reached final layout when L.map() ran, leaving
+      // the map blank.
+      requestAnimationFrame(() => map.invalidateSize());
+      setTimeout(() => map.invalidateSize(), 200);
 
       // Cumulative heatmap (red = least, green = most) underneath the route.
       if (allHistory && allHistory.length && typeof L.heatLayer === "function") {
