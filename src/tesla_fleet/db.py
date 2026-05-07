@@ -349,21 +349,45 @@ def record_attention(conn: sqlite3.Connection, ev: dict) -> bool:
         return False
 
 
+def _driver_seconds_in_car(conn: sqlite3.Connection) -> dict[str, float]:
+    """Estimate seconds-in-the-car per driver by summing the gaps between
+    consecutive driver_sample events (ignoring gaps > 5 min, which mark a
+    new session). Only samples with the driver field populated count."""
+    rows = conn.execute(
+        "SELECT ts, driver FROM events WHERE type = 'driver_sample'"
+        " AND driver IS NOT NULL ORDER BY driver, ts ASC"
+    ).fetchall()
+    totals: dict[str, float] = {}
+    last_ts: float | None = None
+    last_driver: str | None = None
+    for r in rows:
+        if r["driver"] != last_driver:
+            last_driver, last_ts = r["driver"], r["ts"]
+            continue
+        gap = r["ts"] - (last_ts or r["ts"])
+        if 0 < gap <= 300:                          # ≤5 min = same session
+            totals[r["driver"]] = totals.get(r["driver"], 0.0) + gap
+        last_ts = r["ts"]
+    return totals
+
+
 def attention_summary(conn: sqlite3.Connection) -> dict:
     """Aggregate cabin-camera inattentiveness by driver, with derived score.
 
-    Score: 100 - 2·gaze_away - 5·phone_use - 8·drowsy, clamped to [0, 100].
-    Verification mismatch rate compares key-based driver vs cabin-cam.
+    Per-kind metrics are reported BOTH as event counts AND as a percentage
+    of time-in-the-car (sum of detection durations / total drive seconds).
+    The score deducts proportionally to those percentages, so a driver who
+    spends 5% of their drive looking at a phone is worse than one who spends
+    1% on it, regardless of total miles.
     """
-    # Per-driver event counts by kind.
     rows = conn.execute(
         "SELECT COALESCE(verified_driver, driver) AS d, kind, COUNT(*) AS n,"
-        " AVG(duration_s) AS avg_dur, MAX(severity) AS max_sev"
+        " AVG(duration_s) AS avg_dur, SUM(duration_s) AS total_dur,"
+        " MAX(severity) AS max_sev"
         " FROM attention_events"
         " WHERE COALESCE(verified_driver, driver) IS NOT NULL"
         " GROUP BY d, kind"
     ).fetchall()
-    # Verification mismatches: when key-based driver and cabin-cam disagree.
     mism = conn.execute(
         "SELECT driver AS expected, verified_driver AS actual, COUNT(*) AS n"
         " FROM attention_events"
@@ -372,21 +396,36 @@ def attention_summary(conn: sqlite3.Connection) -> dict:
         " GROUP BY driver, verified_driver"
     ).fetchall()
 
+    drive_seconds = _driver_seconds_in_car(conn)
+
     drivers: dict[str, dict] = {}
     for r in rows:
         d = drivers.setdefault(r["d"], {
-            "driver": r["d"], "events": 0, "by_kind": {}, "avg_durations": {},
+            "driver": r["d"], "events": 0,
+            "by_kind": {}, "avg_durations": {},
+            "total_durations": {},
         })
         d["events"] += r["n"]
         d["by_kind"][r["kind"]] = r["n"]
         if r["avg_dur"] is not None:
             d["avg_durations"][r["kind"]] = round(r["avg_dur"], 2)
+        if r["total_dur"] is not None:
+            d["total_durations"][r["kind"]] = float(r["total_dur"])
 
     out = []
-    weights = {"gaze_away": 2, "phone_use": 5, "drowsy": 8, "driver_swap": 0}
+    # Pct-of-time-in-car deduction weights: a driver who spends 1% of every
+    # drive on their phone loses 25 pts; 1% drowsy loses 40 pts. Tuned so
+    # realistic distributions land in the B / C range.
+    pct_weights = {"gaze_away": 5, "phone_use": 25, "drowsy": 40, "driver_swap": 0}
     for name, d in drivers.items():
-        deductions = sum(d["by_kind"].get(k, 0) * w for k, w in weights.items())
-        score = max(0, min(100, 100 - deductions))
+        in_car_s = drive_seconds.get(name, 0.0)
+        pct_by_kind: dict[str, float] = {}
+        deductions = 0.0
+        for kind, total_s in d["total_durations"].items():
+            pct = (total_s / in_car_s * 100) if in_car_s > 0 else 0.0
+            pct_by_kind[kind] = round(pct, 2)
+            deductions += pct * pct_weights.get(kind, 0)
+        score = int(max(0, min(100, 100 - deductions)))
         if score >= 90: grade = "A"
         elif score >= 80: grade = "B"
         elif score >= 70: grade = "C"
@@ -394,6 +433,9 @@ def attention_summary(conn: sqlite3.Connection) -> dict:
         else: grade = "F"
         out.append({
             **d,
+            "in_car_seconds": round(in_car_s, 1),
+            "in_car_minutes": round(in_car_s / 60, 1),
+            "pct_by_kind": pct_by_kind,
             "attention_score": score,
             "grade": grade,
         })

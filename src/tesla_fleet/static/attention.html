@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Attention</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260507-125711" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260507-130148" />
 <style>
   .attn-grade {
     width: 90px; height: 90px; border-radius: 12px;
@@ -16,10 +16,11 @@
   .attn-grade.bad { background: linear-gradient(135deg, var(--caliper-red-dim), #2a0508);
                     border-color: var(--caliper-red); }
   .kind-row {
-    display: grid; grid-template-columns: 110px 1fr 60px;
+    display: grid; grid-template-columns: 100px 1fr auto;
     gap: 12px; align-items: center; padding: 8px 0;
     border-bottom: 1px solid var(--matte-green-line); font-size: 13px;
   }
+  .kind-row .n { white-space: nowrap; }
   .kind-row:last-child { border-bottom: 0; }
   .kind-row .kind { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
                     color: var(--text-dim); }
@@ -40,8 +41,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260507-125711" defer></script>
-  <script src="/static/mobile.js?v=20260507-125711" defer></script>
+  <script src="/static/nav.js?v=20260507-130148" defer></script>
+  <script src="/static/mobile.js?v=20260507-130148" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -102,17 +103,23 @@
     const fmt = (n) => Number(n || 0).toLocaleString();
 
     function driverCard(d) {
-      const total = d.events || 1;
+      const pcts = d.pct_by_kind || {};
+      // Cap bar width visually at 20% so distractions don't blow off the
+      // bar at typical sub-percent values, but readable when they spike.
+      const widthFor = (p) => Math.min(100, (p / 20) * 100);
+
       const kindRow = (kind, label) => {
         const n = d.by_kind[kind] || 0;
-        const pct = (n / total) * 100;
+        const pct = pcts[kind] || 0;
         const dur = d.avg_durations[kind];
         return `<div class="kind-row ${kind}">
           <span class="kind">${label}</span>
-          <div class="bar"><div style="width:${pct}%"></div></div>
-          <span class="n">${fmt(n)}${dur ? `<span class="muted" style="font-size:11px"> · ${dur}s avg</span>` : ""}</span>
+          <div class="bar"><div style="width:${widthFor(pct)}%"></div></div>
+          <span class="n">${pct.toFixed(2)}%${dur ? `<span class="muted" style="font-size:11px"> · ${n} ev · ${dur}s avg</span>` : ""}</span>
         </div>`;
       };
+
+      const minutes = d.in_car_minutes != null ? `${fmt(d.in_car_minutes)} min in car` : "";
 
       return `
       <div class="card col-6" style="border-left:3px solid var(--caliper-red); padding:24px">
@@ -120,7 +127,7 @@
           <div>
             <div class="card-label">Verified Driver</div>
             <div style="font-size:32px; font-weight:600; letter-spacing:-0.02em; margin-top:4px">${d.driver}</div>
-            <div class="muted" style="font-size:13px; margin-top:4px">${fmt(d.events)} attention events recorded</div>
+            <div class="muted" style="font-size:13px; margin-top:4px">${minutes}${minutes ? ' · ' : ''}${fmt(d.events)} attention events</div>
           </div>
           <div style="text-align:center">
             <div class="card-label">Score</div>
@@ -129,7 +136,10 @@
           </div>
         </div>
 
-        <div style="margin-top:16px">
+        <div class="muted" style="font-size:11px; letter-spacing:0.16em; text-transform:uppercase; margin-top:18px">
+          Distractions as % of time in car
+        </div>
+        <div style="margin-top:6px">
           ${kindRow("gaze_away",   "Gaze Away")}
           ${kindRow("phone_use",   "Phone Use")}
           ${kindRow("drowsy",      "Drowsy")}
