@@ -1372,37 +1372,6 @@ def api_report(driver: str) -> dict:
     }
 
 
-@app.get("/api/status/{vin}")
-async def api_status(vin: str, client: TeslaFleetClient = Depends(get_client)) -> dict:
-    """Compact status payload tailored for the dashboard."""
-    async with client:
-        try:
-            data = await client.vehicle_data(vin)
-        except Exception as e:
-            return {"online": False, "error": str(e)}
-    drive = data.get("drive_state") or {}
-    veh = data.get("vehicle_state") or {}
-    charge = data.get("charge_state") or {}
-    climate = data.get("climate_state") or {}
-    return {
-        "online": True,
-        "display_name": veh.get("vehicle_name") or data.get("display_name"),
-        "vin": vin,
-        "speed_mph": drive.get("speed"),
-        "shift_state": drive.get("shift_state") or "P",
-        "lat": drive.get("latitude"),
-        "lon": drive.get("longitude"),
-        "speed_limit_mph": (drive.get("speed_limit_mode") or {}).get("current_limit_mph"),
-        "battery_level": charge.get("battery_level"),
-        "battery_range_mi": charge.get("battery_range"),
-        "charging_state": charge.get("charging_state"),
-        "charge_energy_added": charge.get("charge_energy_added"),
-        "odometer": veh.get("odometer"),
-        "inside_temp_f": climate.get("inside_temp"),
-        "locked": veh.get("locked"),
-    }
-
-
 # ============================================================
 #  Background poller — fetches vehicle_data, derives events, persists to SQLite
 # ============================================================

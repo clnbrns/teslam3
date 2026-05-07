@@ -26,42 +26,11 @@ function toast(msg) {
   setTimeout(() => el.classList.remove("show"), 2400);
 }
 
-async function refreshStatus(vin) {
-  try {
-    const r = await fetch(`/api/status/${encodeURIComponent(vin)}`);
-    if (!r.ok) throw new Error("status " + r.status);
-    const s = await r.json();
-    setStatus(!!s.online);
-    if (!s.online) return;
-
-    if (s.display_name) $("vehicle-name").textContent = s.display_name;
-    $("vehicle-vin").textContent = vin;
-
-    $("shift").textContent = s.shift_state || "P";
-    $("locked").textContent = s.locked === true ? "Yes" : s.locked === false ? "No" : "—";
-    $("cabin").textContent = s.inside_temp_f != null ? `${fmt(s.inside_temp_f, 0)} °F` : "— °F";
-
-    const speed = s.speed_mph ?? 0;
-    $("speed").textContent = fmt(speed);
-    $("limit").textContent = s.speed_limit_mph ? `${s.speed_limit_mph} mph` : "—";
-    $("speed-bar").style.width = Math.min(100, (speed / 90) * 100) + "%";
-
-    const bat = s.battery_level ?? 0;
-    $("battery-pct").textContent = bat;
-    const bf = $("battery-fill");
-    bf.style.width = bat + "%";
-    bf.classList.toggle("low", bat < 20);
-    $("range").textContent = s.battery_range_mi ? `${fmt(s.battery_range_mi, 0)} mi` : "— mi";
-    $("charging").textContent = s.charging_state || "Idle";
-
-    if (s.lat != null && s.lon != null) {
-      $("coords").textContent = `${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}`;
-      $("maps").href = `https://www.google.com/maps?q=${s.lat},${s.lon}`;
-    }
-    if (s.odometer != null) $("odo").textContent = fmt(s.odometer, 0);
-  } catch (e) {
-    setStatus(false);
-  }
+async function refreshStatus(_vin) {
+  // /api/status was removed to cut Tesla Fleet API quota usage. The hidden
+  // /dashboard page no longer shows live speed/battery; refresh from the
+  // Map page (uses logged samples) or the Tesla mobile app.
+  setStatus(false);
 }
 
 async function refreshEvents() {
