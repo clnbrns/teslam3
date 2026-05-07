@@ -1417,36 +1417,102 @@ HARD_BRAKE_MPHS = -7.0
 RAPID_ACCEL_MPHS = 7.0
 
 
+def _maybe_heartbeat(
+    vin: str, driver: str | None, summary: dict,
+    last_heartbeat: float, every: float,
+) -> float:
+    """Write a cheap 'asleep' heartbeat from the /vehicle summary endpoint
+    so we have *some* row indicating the poller is alive, but only every
+    HEARTBEAT_EVERY seconds. Returns the new last_heartbeat ts."""
+    now = time.time()
+    if now - last_heartbeat < every:
+        return last_heartbeat
+    record = {
+        "type": "heartbeat",
+        "ts": now,
+        "vin": vin,
+        "driver": driver,
+        "speed_mph": None,
+        "shift_state": None,
+        "battery_level": (summary.get("charge_state") or {}).get("battery_level"),
+        "state": summary.get("state"),
+        "gps": None,
+    }
+    try:
+        with db.connect() as conn:
+            db.record_event(conn, record)
+    except Exception:
+        logger.exception("[poll] heartbeat write failed")
+    return now
+
+
 async def _poll_loop(vin: str, interval: float) -> None:
-    """Forever-loop: fetch vehicle_data, transform, persist. Backs off on errors."""
+    """Adaptive forever-loop. Burns API quota only when something is happening.
+
+    Cadence:
+      - Driving (shift D/R or speed > 0):   30s   (the configured interval)
+      - Parked + online:                    5 min
+      - Asleep:                             30 min, cheap state-only check
+                                            (NEVER wake the car just to peek)
+      - Overnight (23:00–06:00 local):      cap at 1 hr unless we know it's
+                                            actively driving
+    """
     last_speed = None
     last_ts = None
     current_driver: str | None = None
     consecutive_errors = 0
     last_heartbeat = 0.0
-    HEARTBEAT_EVERY = 300  # parked-state status row every 5 min
+    HEARTBEAT_EVERY = 600  # parked status row every 10 min
+
+    DRIVING_INTERVAL = max(interval, 30)
+    PARKED_INTERVAL = 5 * 60       # 5 min when parked + awake
+    ASLEEP_INTERVAL = 30 * 60      # 30 min when asleep — cheap probe only
+    OVERNIGHT_INTERVAL = 60 * 60   # 1 hr 23:00–06:00 if not driving
+
+    def overnight() -> bool:
+        h = datetime.now().hour
+        return h >= 23 or h < 6
 
     while True:
         try:
             token = app.state.store.load()
             if token is None:
                 logger.info("[poll] no OAuth token yet; sleeping")
-                await asyncio.sleep(interval)
+                await asyncio.sleep(PARKED_INTERVAL)
                 continue
 
             client = TeslaFleetClient(app.state.settings, token, app.state.store)
             async with client:
+                # Cheap state probe first — does NOT wake the car and uses far
+                # less quota than vehicle_data.
+                try:
+                    summary = await client.vehicle(vin)
+                except Exception:
+                    logger.exception("[poll] vehicle() probe failed")
+                    summary = {}
+
+                state = (summary.get("state") or "").lower()
+                if state in ("asleep", "offline"):
+                    # Don't wake. Just record the latest known battery state
+                    # from the summary (cheap) and try again much later.
+                    sleep_for = OVERNIGHT_INTERVAL if overnight() else ASLEEP_INTERVAL
+                    last_heartbeat = _maybe_heartbeat(
+                        vin, current_driver, summary, last_heartbeat, HEARTBEAT_EVERY,
+                    )
+                    consecutive_errors = 0
+                    await asyncio.sleep(sleep_for)
+                    continue
+
+                # Online — fetch full data only at adaptive cadence.
                 try:
                     data = await client.vehicle_data(vin)
                 except Exception as e:
                     msg = str(e)
                     if "404" in msg or "408" in msg or "asleep" in msg.lower():
-                        logger.info("[poll] car asleep — sending wake_up")
-                        try:
-                            await client.wake_up(vin)
-                        except Exception:
-                            pass
-                        await asyncio.sleep(interval)
+                        # Car went to sleep between probe and read — back off,
+                        # don't wake it.
+                        sleep_for = OVERNIGHT_INTERVAL if overnight() else ASLEEP_INTERVAL
+                        await asyncio.sleep(sleep_for)
                         continue
                     raise
 
@@ -1533,7 +1599,15 @@ async def _poll_loop(vin: str, interval: float) -> None:
                     )
 
             consecutive_errors = 0
-            await asyncio.sleep(interval)
+
+            # Pick next-tick cadence based on what we just saw.
+            if is_drive_sample:
+                next_sleep = DRIVING_INTERVAL
+            elif overnight():
+                next_sleep = OVERNIGHT_INTERVAL
+            else:
+                next_sleep = PARKED_INTERVAL
+            await asyncio.sleep(next_sleep)
 
         except asyncio.CancelledError:
             raise
