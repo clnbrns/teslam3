@@ -159,9 +159,10 @@ class MobileURLMiddleware(BaseHTTPMiddleware):
             return RedirectResponse(target, status_code=302)
 
         response = await call_next(request)
-        if rewrote_to_mobile:
-            response.set_cookie("layout", "mobile", max_age=86400, samesite="lax")
-        elif set_desktop_cookie:
+        # Don't pin a layout cookie any more; the front-end decides layout
+        # from viewport width, which means the same browser can switch between
+        # mobile / desktop UI just by resizing.
+        if set_desktop_cookie:
             response.set_cookie("layout", "desktop", max_age=86400, samesite="lax")
         return response
 

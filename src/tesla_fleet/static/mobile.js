@@ -15,7 +15,11 @@
     }, '');
   }
 
-  const isMobileLayout = readCookie('layout') === 'mobile';
+  // Mobile layout = narrow viewport. Cookie alone is a footgun: once anyone
+  // visits /m/* the cookie sticks for 24h and the desktop browser would keep
+  // showing mobile UI. Width-based detection matches the CSS breakpoints at
+  // /static/dashboard.css (mobile <=768px, tablet <=1000px).
+  const isMobileLayout = window.innerWidth <= 1000;
   if (isMobileLayout) document.body.classList.add('mobile');
 
   // ---------- Hamburger bar + drawer (mobile layout only) ----------
