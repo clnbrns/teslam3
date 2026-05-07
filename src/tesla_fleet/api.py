@@ -1161,19 +1161,25 @@ def _point_segment_distance_sq(plat, plon, lat1, lon1, lat2, lon2, cos_lat):
 
 
 @app.get("/api/gps/all")
-def api_gps_all(limit: int = 5000) -> dict:
+def api_gps_all(limit: int = 5000, driver: str | None = None) -> dict:
     """Return all GPS points across the database for the Map page.
     Filters at SQL level to GPS-bearing rows; the historical import has 135K
     rows without GPS, so a naive ORDER BY ASC LIMIT misses live data entirely.
+    Optional ``driver`` query filters to one driver's samples only.
     """
     with db.connect() as conn:
-        rows = conn.execute(
+        sql = (
             "SELECT ts, type, payload FROM events"
             " WHERE type IN ('driver_sample', 'heartbeat')"
             " AND json_extract(payload, '$.gps.lat') IS NOT NULL"
-            " ORDER BY ts ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        )
+        params: list = []
+        if driver:
+            sql += " AND LOWER(driver) = LOWER(?)"
+            params.append(driver)
+        sql += " ORDER BY ts ASC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
     points: list[dict] = []
     for r in rows:
         try:

@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Map</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260507-125306" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260507-125711" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
 <!-- Leaflet must load BEFORE leaflet.heat (the plugin extends L on import). -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
@@ -36,8 +36,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260507-125306" defer></script>
-  <script src="/static/mobile.js?v=20260507-125306" defer></script>
+  <script src="/static/nav.js?v=20260507-125711" defer></script>
+  <script src="/static/mobile.js?v=20260507-125711" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -70,7 +70,13 @@
 
     <section class="grid">
       <div class="card col-12">
-        <div style="display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+          <div class="map-toggle" role="tablist" id="driver-toggle">
+            <button data-driver="" class="active">All</button>
+            <button data-driver="Colin">Colin</button>
+            <button data-driver="Lindsey">Lindsey</button>
+            <button data-driver="Carson">Carson</button>
+          </div>
           <span class="heat-bar muted">
             Less driven
             <span class="scale" aria-hidden="true"></span>
@@ -176,7 +182,9 @@
       }
 
       $("count-pill").textContent = `${points.length.toLocaleString()} pts`;
-      $("sub").textContent = `${points.length.toLocaleString()} GPS points across ${sessions.length} session${sessions.length>1?"s":""}`;
+      const who = activeDriverFilter ? ` · ${activeDriverFilter}` : "";
+      $("sub").textContent =
+        `${points.length.toLocaleString()} GPS points across ${sessions.length} session${sessions.length>1?"s":""}${who}`;
       return map;
     }
 
@@ -214,18 +222,35 @@
       } catch (err) { console.warn("enforcement", err); }
     }
 
+    let activeDriverFilter = "";   // "" = All; otherwise "Colin"/"Lindsey"/"Carson"
+    let MAP_INSTANCE = null;       // re-used across reloads so we don't lose pan/zoom
+
     async function load() {
-      const r = await fetch("/api/gps/all?limit=10000");
+      const qs = activeDriverFilter ? `&driver=${encodeURIComponent(activeDriverFilter)}` : "";
+      const r = await fetch(`/api/gps/all?limit=10000${qs}`);
       const d = await r.json();
       const tryRender = () => {
         if (typeof L === "undefined") return setTimeout(tryRender, 50);
-        const map = renderMap(d.points || []);
-        if (map) loadEnforcement(map);
+        // Tear down the prior map (heat + path layers) so the redraw is clean.
+        if (MAP_INSTANCE) { MAP_INSTANCE.remove(); MAP_INSTANCE = null; heatLayer = null; }
+        MAP_INSTANCE = renderMap(d.points || []);
+        if (MAP_INSTANCE) loadEnforcement(MAP_INSTANCE);
       };
       tryRender();
     }
     window.refresh = load;
-    document.addEventListener("DOMContentLoaded", load);
+    document.addEventListener("DOMContentLoaded", () => {
+      // Driver toggle wires through to load() with the new filter.
+      document.querySelectorAll("#driver-toggle button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll("#driver-toggle button")
+            .forEach(b => b.classList.toggle("active", b === btn));
+          activeDriverFilter = btn.dataset.driver || "";
+          load();
+        });
+      });
+      load();
+    });
   </script>
 </body>
 </html>
