@@ -4,13 +4,19 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Map</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260507-130437" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260509-211412" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
 <!-- Leaflet must load BEFORE leaflet.heat (the plugin extends L on import). -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <style>
-  #all-map { height: 70vh; min-height: 480px; border-radius: 8px; background: var(--carbon-2); }
+  #all-map {
+    height: 70vh; min-height: 480px;
+    width: 100%;
+    border-radius: 8px;
+    background: var(--carbon-2);
+    position: relative; z-index: 0;
+  }
   body.mobile #all-map { height: calc(100vh - 220px); min-height: 360px; }
   .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-top: 10px; align-items: center; }
   .legend .swatch { width: 14px; height: 3px; display: inline-block; margin-right: 6px; vertical-align: middle; }
@@ -36,8 +42,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260507-130437" defer></script>
-  <script src="/static/mobile.js?v=20260507-130437" defer></script>
+  <script src="/static/nav.js?v=20260509-211412" defer></script>
+  <script src="/static/mobile.js?v=20260509-211412" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -119,6 +125,10 @@
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap',
       }).addTo(map);
+      // Force tile load even if container measured 0×0 at init time.
+      requestAnimationFrame(() => map.invalidateSize());
+      setTimeout(() => map.invalidateSize(), 200);
+      window.addEventListener("resize", () => map.invalidateSize());
       if (!points.length) {
         $("empty-note").style.display = "";
         $("count-pill").textContent = "0 pts";
