@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Map</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260509-211412" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260509-211954" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
 <!-- Leaflet must load BEFORE leaflet.heat (the plugin extends L on import). -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
@@ -42,8 +42,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260509-211412" defer></script>
-  <script src="/static/mobile.js?v=20260509-211412" defer></script>
+  <script src="/static/nav.js?v=20260509-211954" defer></script>
+  <script src="/static/mobile.js?v=20260509-211954" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -125,9 +125,7 @@
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap',
       }).addTo(map);
-      // Force tile load even if container measured 0×0 at init time.
-      requestAnimationFrame(() => map.invalidateSize());
-      setTimeout(() => map.invalidateSize(), 200);
+      // Belt-and-braces: re-measure on resize.
       window.addEventListener("resize", () => map.invalidateSize());
       if (!points.length) {
         $("empty-note").style.display = "";
@@ -239,8 +237,14 @@
       const qs = activeDriverFilter ? `&driver=${encodeURIComponent(activeDriverFilter)}` : "";
       const r = await fetch(`/api/gps/all?limit=10000${qs}`);
       const d = await r.json();
+      const container = document.getElementById("all-map");
       const tryRender = () => {
-        if (typeof L === "undefined") return setTimeout(tryRender, 50);
+        // Don't init Leaflet until both the lib is loaded AND the container
+        // has actual on-screen width — otherwise the tile layer locks to a
+        // 0-width viewport and never paints tiles outside it.
+        if (typeof L === "undefined" || container.offsetWidth < 100) {
+          return setTimeout(tryRender, 50);
+        }
         // Tear down the prior map (heat + path layers) so the redraw is clean.
         if (MAP_INSTANCE) { MAP_INSTANCE.remove(); MAP_INSTANCE = null; heatLayer = null; }
         MAP_INSTANCE = renderMap(d.points || []);

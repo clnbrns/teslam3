@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Trip</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260509-211412" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260509-211954" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
@@ -34,8 +34,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260509-211412" defer></script>
-  <script src="/static/mobile.js?v=20260509-211412" defer></script>
+  <script src="/static/nav.js?v=20260509-211954" defer></script>
+  <script src="/static/mobile.js?v=20260509-211954" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -221,9 +221,12 @@
         $("cost-detail").textContent = "—";
       }
 
-      // Wait for Leaflet to be ready
+      // Wait for Leaflet to be ready AND the container to have real width.
+      const container = document.getElementById("trip-map");
       const tryRender = () => {
-        if (typeof L === "undefined") return setTimeout(tryRender, 50);
+        if (typeof L === "undefined" || container.offsetWidth < 100) {
+          return setTimeout(tryRender, 50);
+        }
         renderMap(t.gps || [], history);
       };
       tryRender();
