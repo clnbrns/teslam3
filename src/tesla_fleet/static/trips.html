@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Trips</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260509-211954" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260513-093528" />
 <style>
   .trip {
     display: grid;
@@ -42,8 +42,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260509-211954" defer></script>
-  <script src="/static/mobile.js?v=20260509-211954" defer></script>
+  <script src="/static/nav.js?v=20260513-093528" defer></script>
+  <script src="/static/mobile.js?v=20260513-093528" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -80,6 +80,7 @@
           <option>Lindsey</option>
         </select>
         <button id="reload" class="btn ghost">Refresh</button>
+        <button id="poll-now" class="btn" title="Costs $0.002 in Tesla API quota — use sparingly">📡 Pull live</button>
       </div>
     </div>
 
@@ -148,6 +149,20 @@
     document.addEventListener("DOMContentLoaded", () => {
       $("reload").addEventListener("click", load);
       $("driver-filter").addEventListener("change", load);
+      $("poll-now").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const original = btn.textContent;
+        btn.disabled = true; btn.textContent = "📡 Pulling…";
+        try {
+          const r = await fetch("/api/poll-now", { method: "POST" });
+          const d = await r.json();
+          btn.textContent = d.ok
+            ? `✓ ${d.shift_state || "P"} · ${d.speed_mph ?? 0}mph · ${d.battery_level ?? "?"}%`
+            : "✗ failed";
+          await load();
+        } catch { btn.textContent = "✗ error"; }
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 4000);
+      });
       load(); setInterval(load, 60_000);
     });
   </script>

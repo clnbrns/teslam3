@@ -208,6 +208,50 @@ def get_active_driver() -> dict:
             "options": ["Colin", "Lindsey", "Carson"]}
 
 
+@app.post("/api/poll-now")
+async def api_poll_now() -> dict:
+    """Manually trigger one immediate poll. Counts against API budget but
+    bypasses the background poller's long sleep — useful when you want
+    live state without waiting for the next scheduled tick."""
+    vin = os.environ.get("TESLA_VIN", "").strip()
+    if not vin:
+        raise HTTPException(503, "TESLA_VIN not set")
+    token = app.state.store.load()
+    if token is None:
+        raise HTTPException(401, "No OAuth token; visit /login")
+    client = TeslaFleetClient(app.state.settings, token, app.state.store)
+    async with client:
+        try:
+            data = await client.vehicle_data(vin)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    drive = data.get("drive_state") or {}
+    veh = data.get("vehicle_state") or {}
+    charge = data.get("charge_state") or {}
+    now = time.time()
+    record = {
+        "type": "manual_refresh",
+        "ts": now,
+        "vin": vin,
+        "driver": getattr(app.state, "active_driver", None),
+        "speed_mph": drive.get("speed"),
+        "shift_state": drive.get("shift_state"),
+        "battery_level": charge.get("battery_level"),
+        "battery_range_mi": charge.get("battery_range"),
+        "charging_state": charge.get("charging_state"),
+        "odometer": veh.get("odometer"),
+        "gps": ({"lat": drive["latitude"], "lon": drive["longitude"]}
+                if drive.get("latitude") is not None else None),
+    }
+    with db.connect() as conn:
+        db.record_event(conn, record)
+        odo = veh.get("odometer")
+        kwh = charge.get("charge_energy_added")
+        if odo is not None or kwh is not None:
+            db.update_roi(conn, vin, odometer_mi=odo, charge_energy_added_kwh=kwh)
+    return {"ok": True, **{k: v for k, v in record.items() if k != "gps"}}
+
+
 @app.post("/api/active-driver")
 async def set_active_driver(req: Request) -> dict:
     body = await req.json()
@@ -1439,14 +1483,16 @@ async def _poll_loop(vin: str, interval: float) -> None:
     last_heartbeat = 0.0
     HEARTBEAT_EVERY = 600  # parked status row every 10 min
 
-    DRIVING_INTERVAL = max(interval, 30)
-    PARKED_INTERVAL = 5 * 60       # 5 min when parked + awake
-    ASLEEP_INTERVAL = 30 * 60      # 30 min when asleep — cheap probe only
-    OVERNIGHT_INTERVAL = 60 * 60   # 1 hr 23:00–06:00 if not driving
+    # Tuned to hit ~$5/month Tesla Fleet API budget (was ~$15/mo before).
+    # Each call costs ~$0.002, so monthly budget = ~2,500 calls = 83/day.
+    DRIVING_INTERVAL = max(interval, 90)   # was 30s — accept lower granularity
+    PARKED_INTERVAL = 45 * 60              # was 5 min
+    ASLEEP_INTERVAL = 2 * 3600             # was 30 min
+    OVERNIGHT_INTERVAL = 12 * 3600         # was 1 hr — skip the whole window
 
     def overnight() -> bool:
         h = datetime.now().hour
-        return h >= 23 or h < 6
+        return h >= 22 or h < 6
 
     while True:
         try:
@@ -1456,29 +1502,18 @@ async def _poll_loop(vin: str, interval: float) -> None:
                 await asyncio.sleep(PARKED_INTERVAL)
                 continue
 
+            # Overnight kill-switch — skip polling entirely 22:00–06:00.
+            # Saves ~8 hours × 60min/PARKED_INTERVAL = 11 calls/night = ~$0.66/mo.
+            if overnight():
+                await asyncio.sleep(OVERNIGHT_INTERVAL)
+                continue
+
             client = TeslaFleetClient(app.state.settings, token, app.state.store)
             async with client:
-                # Cheap state probe first — does NOT wake the car and uses far
-                # less quota than vehicle_data.
-                try:
-                    summary = await client.vehicle(vin)
-                except Exception:
-                    logger.exception("[poll] vehicle() probe failed")
-                    summary = {}
-
-                state = (summary.get("state") or "").lower()
-                if state in ("asleep", "offline"):
-                    # Don't wake. Just record the latest known battery state
-                    # from the summary (cheap) and try again much later.
-                    sleep_for = OVERNIGHT_INTERVAL if overnight() else ASLEEP_INTERVAL
-                    last_heartbeat = _maybe_heartbeat(
-                        vin, current_driver, summary, last_heartbeat, HEARTBEAT_EVERY,
-                    )
-                    consecutive_errors = 0
-                    await asyncio.sleep(sleep_for)
-                    continue
-
-                # Online — fetch full data only at adaptive cadence.
+                # Skip the cheap-probe step — /api/1/vehicles/{vin} bills
+                # the same as /vehicle_data, so it was just a wasted call.
+                # Call vehicle_data directly; rely on the 404/408 error path
+                # to detect asleep state (and back off longer in that case).
                 try:
                     data = await client.vehicle_data(vin)
                 except Exception as e:
