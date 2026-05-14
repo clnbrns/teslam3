@@ -1489,6 +1489,14 @@ async def _poll_loop(vin: str, interval: float) -> None:
     PARKED_INTERVAL = 45 * 60              # was 5 min
     ASLEEP_INTERVAL = 2 * 3600             # was 30 min
     OVERNIGHT_INTERVAL = 12 * 3600         # was 1 hr — skip the whole window
+    EXTENDED_IDLE_AFTER = 4 * 3600         # 4 hr of no movement → extended-idle mode
+    EXTENDED_IDLE_INTERVAL = 24 * 3600     # once-daily check-in during long parks
+    # Tracks last time the car was observed moving (speed > 0 or odometer changed).
+    # When (now - last_movement) > EXTENDED_IDLE_AFTER, we ALSO back off to
+    # EXTENDED_IDLE_INTERVAL even if Tesla reports state=online, so that our
+    # polls stop preventing the car from entering its deep-sleep state.
+    last_movement_ts = time.time()
+    last_observed_odo: float | None = None
 
     def overnight() -> bool:
         h = datetime.now().hour
@@ -1610,9 +1618,34 @@ async def _poll_loop(vin: str, interval: float) -> None:
 
             consecutive_errors = 0
 
+            # Track when the car was last observed moving. Each successful
+            # poll that shows movement resets the timer; if the gap exceeds
+            # EXTENDED_IDLE_AFTER, we throttle hard so we don't keep the car
+            # from entering its native deep-sleep state (vampire drain).
+            if is_drive_sample:
+                last_movement_ts = now
+            elif (
+                odometer_mi is not None
+                and last_observed_odo is not None
+                and odometer_mi > last_observed_odo + 0.01
+            ):
+                last_movement_ts = now
+            if odometer_mi is not None:
+                last_observed_odo = odometer_mi
+
+            extended_idle = (now - last_movement_ts) > EXTENDED_IDLE_AFTER
+
             # Pick next-tick cadence based on what we just saw.
             if is_drive_sample:
                 next_sleep = DRIVING_INTERVAL
+            elif extended_idle:
+                logger.info(
+                    "[poll] extended idle (%.1f hr since last movement); "
+                    "backing off %d min to let car sleep",
+                    (now - last_movement_ts) / 3600,
+                    EXTENDED_IDLE_INTERVAL // 60,
+                )
+                next_sleep = EXTENDED_IDLE_INTERVAL
             elif overnight():
                 next_sleep = OVERNIGHT_INTERVAL
             else:
