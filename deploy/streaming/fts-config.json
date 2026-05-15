@@ -1,0 +1,27 @@
+{
+  "host": "0.0.0.0",
+  "port": 4443,
+  "log_level": "info",
+  "json_log_enable": true,
+  "namespace": "tesla_telemetry",
+  "tls": {
+    "server_cert": "/etc/fts/server.crt",
+    "server_key":  "/etc/fts/server.key"
+  },
+  "records": {
+    "alerts":        ["http"],
+    "errors":        ["http"],
+    "V":             ["http"],
+    "connectivity":  ["http"],
+    "vehicle_data":  ["http"]
+  },
+  "dispatchers": {
+    "http": {
+      "url":     "${SINK_URL}",
+      "timeout": "10s",
+      "headers": {
+        "X-Telemetry-Token": "${SINK_TOKEN}"
+      }
+    }
+  }
+}

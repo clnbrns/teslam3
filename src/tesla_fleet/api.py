@@ -407,9 +407,33 @@ async def telemetry_unregister(
 
 @app.post("/telemetry")
 async def telemetry_ingest(req: Request) -> dict:
-    """Receive a telemetry payload pushed from Tesla. Idempotent on (vin, ts)."""
+    """Receive a telemetry payload pushed by Tesla via our Fleet Telemetry
+    Server (FTS). The FTS POSTs decoded protobuf records here, one batch
+    per car connection event. Idempotent on (vin, ts).
+
+    Auth: requires X-Telemetry-Token header matching the TELEMETRY_TOKEN
+    env var. FTS adds this header automatically via its dispatcher config.
+    """
+    expected = os.environ.get("TELEMETRY_TOKEN", "")
+    if expected:
+        got = req.headers.get("x-telemetry-token", "")
+        if not secrets_mod.compare_digest(got, expected):
+            raise HTTPException(401, "bad telemetry token")
     payload = await req.json()
-    written = telemetry.ingest_payload(payload, default_driver=app.state.settings.default_driver)
+    # Two payload shapes are accepted:
+    #   1. FTS HTTP dispatcher: {"vin": "...", "data": [{...}], "createdAt": ...}
+    #      (legacy/pre-2026 shape — already handled by telemetry.ingest_payload)
+    #   2. FTS 2026+ HTTP sink: array of records, each with vehicle_data fields.
+    if isinstance(payload, list):
+        written = 0
+        for record in payload:
+            written += telemetry.ingest_payload(
+                record, default_driver=getattr(app.state, "active_driver", None),
+            )
+        return {"ok": True, "written": written, "batch_size": len(payload)}
+    written = telemetry.ingest_payload(
+        payload, default_driver=getattr(app.state, "active_driver", None),
+    )
     return {"ok": True, "written": written}
 
 

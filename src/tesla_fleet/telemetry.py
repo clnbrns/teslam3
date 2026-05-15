@@ -78,19 +78,45 @@ def build_config(hostname: str, vin: str, port: int = 443) -> dict:
     }
 
 
-async def register(client: TeslaFleetClient, hostname: str, vin: str) -> dict:
-    """Push the telemetry config to Tesla. Idempotent — overwrites prior config."""
+async def register(client: TeslaFleetClient, hostname: str, vin: str,
+                   proxy_url: str | None = None) -> dict:
+    """Push the telemetry config to Tesla. Idempotent — overwrites prior config.
+
+    Tesla requires this call to go through the Vehicle Command Proxy, which
+    signs requests with the partner ECDSA key. If `proxy_url` is provided
+    (e.g. https://vcp.burnsbuilt.co), route through it; otherwise hit Tesla
+    directly (will fail with 400 "must be called through proxy").
+    """
     body = build_config(hostname, vin)
-    return await client._request(
-        "POST", "/api/1/vehicles/fleet_telemetry_config_create", json=body
-    )
+    path = "/api/1/vehicles/fleet_telemetry_config_create"
+
+    if proxy_url:
+        # Proxy expects an Authorization header it forwards upstream.
+        async with httpx.AsyncClient(base_url=proxy_url, timeout=30, verify=False) as proxy:
+            await client._ensure_fresh()
+            resp = await proxy.post(
+                path, json=body,
+                headers={"Authorization": f"Bearer {client.token.access_token}"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    return await client._request("POST", path, json=body)
 
 
-async def unregister(client: TeslaFleetClient, vin: str) -> dict:
+async def unregister(client: TeslaFleetClient, vin: str,
+                     proxy_url: str | None = None) -> dict:
     """Disable streaming for a VIN (back to polling-only)."""
-    return await client._request(
-        "DELETE", f"/api/1/vehicles/{vin}/fleet_telemetry_config",
-    )
+    path = f"/api/1/vehicles/{vin}/fleet_telemetry_config"
+    if proxy_url:
+        async with httpx.AsyncClient(base_url=proxy_url, timeout=30, verify=False) as proxy:
+            await client._ensure_fresh()
+            resp = await proxy.delete(
+                path,
+                headers={"Authorization": f"Bearer {client.token.access_token}"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    return await client._request("DELETE", path)
 
 
 # -----------------------------------------------------------------------

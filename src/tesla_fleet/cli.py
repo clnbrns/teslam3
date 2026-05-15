@@ -142,29 +142,45 @@ app.add_typer(telemetry_app, name="telemetry")
 
 
 @telemetry_app.command("register")
-def telemetry_register(vin: str, hostname: str = typer.Option("")) -> None:
-    """Register a telemetry streaming config for VIN at hostname."""
+def telemetry_register(
+    vin: str,
+    hostname: str = typer.Option("", help="FTS hostname the car will push to"),
+    proxy: str = typer.Option("", help="Vehicle Command Proxy URL (required for new configs)"),
+) -> None:
+    """Register a telemetry streaming config for VIN at hostname.
+
+    Tesla requires telemetry-config calls to be signed via the Vehicle
+    Command Proxy. Pass `--proxy https://vcp.burnsbuilt.co` (or set
+    VEHICLE_COMMAND_PROXY_URL).
+    """
     from tesla_fleet import telemetry as t
 
     async def _run() -> None:
         client, _ = _client_ctx()
         async with client:
             host = hostname or _settings().public_hostname
+            proxy_url = proxy or _settings().vehicle_command_proxy_url
             if not host:
                 raise typer.BadParameter("Pass --hostname or set TESLA_PUBLIC_HOSTNAME")
-            typer.echo(json.dumps(await t.register(client, host, vin), indent=2))
+            if not proxy_url:
+                typer.echo("warning: no --proxy; Tesla will reject with 400", err=True)
+            typer.echo(json.dumps(await t.register(client, host, vin, proxy_url or None), indent=2))
 
     asyncio.run(_run())
 
 
 @telemetry_app.command("unregister")
-def telemetry_unregister(vin: str) -> None:
+def telemetry_unregister(
+    vin: str,
+    proxy: str = typer.Option("", help="Vehicle Command Proxy URL"),
+) -> None:
     from tesla_fleet import telemetry as t
 
     async def _run() -> None:
         client, _ = _client_ctx()
         async with client:
-            typer.echo(json.dumps(await t.unregister(client, vin), indent=2))
+            proxy_url = proxy or _settings().vehicle_command_proxy_url
+            typer.echo(json.dumps(await t.unregister(client, vin, proxy_url or None), indent=2))
 
     asyncio.run(_run())
 
