@@ -904,10 +904,23 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
                     d_mi = (d_pct / 100.0) * BATTERY_KWH * mi_per_kwh
                     source = "battery"
 
+            # Gap between samples implies the drive ended and a (possibly
+            # different) one started. The trip detector polls every 90s while
+            # driving; anything > 20 min must include a parked period.
+            gap = ts - last_ts
+            prev_parked = (last_p.get("shift_state") in (None, "P"))
+            should_split = cur is not None and (
+                gap > 20 * 60
+                or (prev_parked and gap > 5 * 60)
+            )
+            if should_split:
+                segments.append(cur)
+                cur = None
+
             if d_mi:
                 if cur is None:
                     cur = {
-                        "start_ts": last_ts, "end_ts": ts,
+                        "start_ts": ts, "end_ts": ts,  # start = first moving sample
                         "start_odo": last_odo, "end_odo": odo,
                         "start_battery": last_bat, "end_battery": bat,
                         "miles_est": d_mi, "source": source,
