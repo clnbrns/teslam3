@@ -863,7 +863,7 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
 
     rows = conn.execute(
         "SELECT ts, payload FROM events"
-        " WHERE type IN ('heartbeat', 'driver_sample')"
+        " WHERE type IN ('heartbeat', 'driver_sample', 'manual_refresh')"
         " ORDER BY ts ASC"
     ).fetchall()
 
