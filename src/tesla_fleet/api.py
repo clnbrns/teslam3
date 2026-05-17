@@ -883,6 +883,7 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
         odo = p.get("odometer")
         bat = p.get("battery_level")
         charging = (p.get("charging_state") or "").lower() == "charging"
+        drv = p.get("driver")
 
         if last is not None:
             last_ts, last_p = last
@@ -924,6 +925,7 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
                         "start_odo": last_odo, "end_odo": odo,
                         "start_battery": last_bat, "end_battery": bat,
                         "miles_est": d_mi, "source": source,
+                        "drivers": [],
                     }
                 else:
                     cur["end_ts"] = ts
@@ -932,6 +934,10 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
                     cur["miles_est"] += d_mi
                     if cur["source"] != source:
                         cur["source"] = "mixed"
+                # Collect driver attribution from both endpoints of the delta.
+                for _d in (last_p.get("driver"), drv):
+                    if _d:
+                        cur["drivers"].append(_d)
             else:
                 if cur:
                     segments.append(cur)
@@ -950,9 +956,11 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
         ) else None
         avg_speed = (s["miles_est"] / (dur_min / 60)) if dur_min > 0 else 0
         cost = _trip_cost(s["miles_est"], bat_used)
+        drivers = s.get("drivers") or []
+        seg_driver = max(set(drivers), key=drivers.count) if drivers else "—"
         out.append({
             "kind": "segment",
-            "driver": "—",
+            "driver": seg_driver,
             "start_ts": s["start_ts"],
             "end_ts": s["end_ts"],
             "duration_minutes": round(dur_min, 1),
@@ -983,7 +991,7 @@ def api_trip_detail(start_ts: int) -> dict:
         # cap the lookahead to 6 hours which is far more than any realistic trip.
         rows = conn.execute(
             "SELECT ts, type, payload FROM events"
-            " WHERE type IN ('heartbeat', 'driver_sample')"
+            " WHERE type IN ('heartbeat', 'driver_sample', 'manual_refresh')"
             " AND ts >= ? AND ts <= ? ORDER BY ts ASC",
             (start_ts, start_ts + 6 * 3600),
         ).fetchall()
