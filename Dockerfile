@@ -17,4 +17,8 @@ ENV TESLA_DB_PATH=/data/tesla.db \
 EXPOSE 8080
 
 # Honor Railway's $PORT (defaults to 8080 locally).
-CMD ["sh", "-c", "mkdir -p /data && uvicorn tesla_fleet.api:app --host 0.0.0.0 --port ${PORT}"]
+# Pin to 1 worker — single-VIN dashboard doesn't need parallelism, and extra
+# workers each duplicate the ~200MB Python/httpx/SQLite footprint (was ~$26/mo
+# in Railway memory billing). --limit-max-requests recycles the worker every
+# 5000 requests as a belt-and-suspenders guard against slow memory creep.
+CMD ["sh", "-c", "mkdir -p /data && exec uvicorn tesla_fleet.api:app --host 0.0.0.0 --port ${PORT} --workers 1 --no-access-log --limit-max-requests 5000"]
