@@ -46,8 +46,6 @@
         <a href="/report?driver=Carson">Carson</a>
       </span>
     </span>
-    <a href="/fsd">FSD</a>
-    <a href="/attention">Attention</a>
     <a href="/charging">Charging</a>
     <a href="/trips" class="active">Trips</a>
     <a href="/map">Map</a>
@@ -204,10 +202,12 @@
 
       const start = new Date(t.start_ts*1000);
       $("title").textContent = `Trip · ${start.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'})}`;
-      $("when").textContent =
-        `${start.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} – ${
-          new Date(t.end_ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
-        }${t.driver ? ` · ${t.driver}` : ""}`;
+      const timeStr = `${start.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} – ${
+        new Date(t.end_ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
+      $("when").innerHTML =
+        `${timeStr} · <span id="driver-label" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px"
+           title="Click to reassign driver">${t.driver || "Set driver"}</span>`;
+      $("driver-label").addEventListener("click", () => openDriverPicker(t.start_ts, t.driver));
 
       $("miles").textContent = fmt(t.miles, 1);
       $("speeds").textContent = `${fmt(t.avg_speed_mph,0)} / ${fmt(t.max_speed_mph,0)} mph`;
@@ -233,6 +233,24 @@
 
       renderSpeedChart(t.speeds || []);
       renderIncidents(t.incidents || []);
+    }
+
+    async function openDriverPicker(startTs, current) {
+      const drivers = ["Colin", "Lindsey", "Carson"];
+      const choices = drivers.filter(d => d !== current).join(", ");
+      const pick = window.prompt(
+        `Reassign driver for this trip.\nCurrent: ${current || "—"}\nType: ${choices} (or any name)`,
+        current || ""
+      );
+      if (!pick || pick.trim() === (current || "")) return;
+      const res = await fetch(`/api/trip/${startTs}/driver`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({driver: pick.trim()}),
+      });
+      if (!res.ok) { alert("Failed to reassign: " + res.status); return; }
+      const j = await res.json();
+      $("driver-label").textContent = j.driver;
     }
 
     document.addEventListener("DOMContentLoaded", load);

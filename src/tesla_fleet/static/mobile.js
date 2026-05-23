@@ -27,8 +27,6 @@
     { href: '/',          label: 'Trips',     icon: '<path d="M3 17l4-9 4 5 4-3 6 7"/><circle cx="6" cy="18" r="1.5"/><circle cx="18" cy="18" r="1.5"/>' },
     { href: '/map',       label: 'Map',       icon: '<path d="M9 4l-6 2v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/>' },
     { href: '/report',    label: 'Driver Report', icon: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 5-6 8-6s7 2 8 6"/>' },
-    { href: '/fsd',       label: 'FSD Usage', icon: '<path d="M3 12h4l2-5 4 10 2-5h6"/>' },
-    { href: '/attention', label: 'Attention', icon: '<circle cx="12" cy="12" r="3"/><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12z"/>' },
     { href: '/charging',  label: 'Charging',  icon: '<path d="M14 3l-4 8h4l-2 10 8-12h-4l3-6h-5z"/>' },
     { href: '/roi',       label: 'ROI / TCO', icon: '<path d="M4 20V8M10 20v-8M16 20v-4M22 20V4"/>' },
     { href: '/events',    label: 'Events',    icon: '<path d="M4 6h16M4 12h16M4 18h10"/>' },

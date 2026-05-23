@@ -17,3 +17,4 @@ tesla.db
 tesla.db-*
 .DS_Store
 secrets/
+dev.db

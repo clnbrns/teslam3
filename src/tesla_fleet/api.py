@@ -982,6 +982,52 @@ def trip_detail_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "trip_detail.html")
 
 
+@app.post("/api/trip/{start_ts:int}/driver")
+async def api_trip_set_driver(start_ts: int, req: Request) -> dict:
+    """Reassign the driver for every event inside a trip's time window.
+
+    Tesla's vehicle_data endpoint doesn't reliably expose active_driver_profile,
+    so trips inherit whatever the UI override (POST /api/active-driver) was set
+    to at poll time. This endpoint lets the user correct attribution post-hoc
+    from the trip detail page — one click instead of a Railway SQL session.
+    """
+    body = await req.json()
+    driver = (body.get("driver") or "").strip()
+    if not driver:
+        raise HTTPException(status_code=400, detail="driver required")
+
+    # Reuse the trip-detail boundary logic so the update window matches what
+    # the UI shows. The detail call returns the inferred end_ts.
+    detail = api_trip_detail(start_ts)
+    end_ts = detail.get("end_ts") or (start_ts + 6 * 3600)
+
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE events SET driver = ? WHERE ts >= ? AND ts <= ?"
+            " AND type IN ('heartbeat', 'driver_sample', 'manual_refresh')",
+            (driver, start_ts, end_ts),
+        )
+        # Also rewrite driver inside the JSON payload so trips list (which reads
+        # payload.driver via _derive_odometer_segments) reflects the change.
+        rows = conn.execute(
+            "SELECT id, payload FROM events WHERE ts >= ? AND ts <= ?"
+            " AND type IN ('heartbeat', 'driver_sample', 'manual_refresh')",
+            (start_ts, end_ts),
+        ).fetchall()
+        for r in rows:
+            try:
+                p = json.loads(r["payload"])
+                p["driver"] = driver
+                conn.execute("UPDATE events SET payload = ? WHERE id = ?",
+                             (json.dumps(p), r["id"]))
+            except Exception:
+                continue
+        conn.commit()
+    logger.info("reassigned trip %s → %s (%d rows)", start_ts, driver, cur.rowcount)
+    return {"ok": True, "driver": driver, "rows": cur.rowcount,
+            "start_ts": start_ts, "end_ts": end_ts}
+
+
 @app.get("/api/trip/{start_ts:int}")
 def api_trip_detail(start_ts: int) -> dict:
     """Detailed view of a single trip: all polled events between start_ts and
