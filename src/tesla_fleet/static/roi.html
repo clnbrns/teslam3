@@ -56,6 +56,10 @@
         <div class="card-row"><span class="k">Miles (est)</span><span class="v tnum" id="miles">0</span></div>
         <div class="card-row"><span class="k">Energy</span><span class="v tnum" id="kwh">0 kWh</span></div>
         <div class="card-row"><span class="k">Efficiency</span><span class="v tnum" id="mi-per-kwh">— mi/kWh</span></div>
+        <div class="card-row"
+             title="EPA gallon-of-gas equivalent: 33.7 kWh = 1 gal. EPA sticker for 2024 M3P is 113 MPGe combined.">
+          <span class="k">MPGe</span><span class="v tnum" id="mpge">—</span>
+        </div>
         <div class="card-row"><span class="k">Electricity</span><span class="v tnum" id="cost-elec">—</span></div>
         <div class="card-row"><span class="k">Per-mile maint</span><span class="v tnum" id="cost-maint">—</span></div>
         <div class="card-row"><span class="k">One-off expenses</span><span class="v tnum" id="cost-infra">—</span></div>
@@ -161,6 +165,8 @@
       $("kwh").textContent = `${fmt(data.total_kwh, 1)} kWh`;
       const mipk = data.total_kwh > 0 ? data.total_miles / data.total_kwh : 0;
       $("mi-per-kwh").textContent = mipk ? `${fmt(mipk, 2)} mi/kWh` : "—";
+      // MPGe = mi/kWh × 33.7 (EPA gallon-equivalent constant).
+      $("mpge").textContent = mipk ? fmt(mipk * 33.7, 0) : "—";
       $("cost-elec").textContent = `$${fmt(data.electric_cost_usd, 0)}`;
       $("cost-maint").textContent = `$${fmt(data.tesla_maint_cost_usd, 0)}`;
       $("cost-infra").textContent = `$${fmt(data.tesla_one_off_cost_usd, 0)}`;
