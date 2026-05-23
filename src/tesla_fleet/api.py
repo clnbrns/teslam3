@@ -1295,6 +1295,57 @@ def _point_segment_distance_sq(plat, plon, lat1, lon1, lat2, lon2, cos_lat):
     return (px - cx) ** 2 + (py - cy) ** 2
 
 
+@app.get("/api/daily-usage")
+def api_daily_usage(days: int = 30) -> dict:
+    """Per-day miles driven + kWh added over the last ``days`` days.
+
+    Derives miles from positive odometer deltas between consecutive samples,
+    and kWh from positive charge_energy_added deltas (treating any drop as a
+    session reset — the prior peak was already banked, same logic as
+    monitor.RoiState.update). One row per day in chronological order.
+    """
+    days = max(1, min(int(days), 365))
+    cutoff = time.time() - days * 86400
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT ts, payload FROM events"
+            " WHERE ts >= ? AND type IN ('heartbeat', 'driver_sample', 'manual_refresh')"
+            " ORDER BY ts ASC",
+            (cutoff,),
+        ).fetchall()
+
+    daily: dict[str, dict] = {}
+    last_odo: float | None = None
+    last_kwh: float | None = None
+    for r in rows:
+        try:
+            p = json.loads(r["payload"])
+        except Exception:
+            continue
+        d = datetime.fromtimestamp(r["ts"]).date().isoformat()
+        bucket = daily.setdefault(d, {"date": d, "miles": 0.0, "kwh": 0.0})
+
+        odo = p.get("odometer")
+        if odo is not None:
+            if last_odo is not None and odo >= last_odo:
+                bucket["miles"] += odo - last_odo
+            last_odo = odo
+
+        kwh = p.get("charge_energy_added")
+        if kwh is not None:
+            # Session reset: drop to ~0 means the prior peak is already
+            # accounted; only accumulate monotonic increases.
+            if last_kwh is not None and kwh >= last_kwh:
+                bucket["kwh"] += kwh - last_kwh
+            last_kwh = kwh
+
+    out = sorted(daily.values(), key=lambda x: x["date"])
+    for b in out:
+        b["miles"] = round(b["miles"], 1)
+        b["kwh"] = round(b["kwh"], 2)
+    return {"days": out}
+
+
 @app.get("/api/gps/all")
 def api_gps_all(limit: int = 5000, driver: str | None = None) -> dict:
     """Return all GPS points across the database for the Map page.

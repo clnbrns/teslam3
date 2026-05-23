@@ -4,11 +4,11 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · ROI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260523-113757" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260523-114228" />
 </head>
 <body>
-  <script src="/static/nav.js?v=20260523-113757" defer></script>
-  <script src="/static/mobile.js?v=20260523-113757" defer></script>
+  <script src="/static/nav.js?v=20260523-114228" defer></script>
+  <script src="/static/mobile.js?v=20260523-114228" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -69,6 +69,15 @@
       <div class="card col-12">
         <div class="card-label">Comparison Garage</div>
         <div id="comparison-garage" class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-top:6px"></div>
+      </div>
+
+      <div class="card col-12">
+        <div class="card-label">Daily Miles &amp; Energy Added</div>
+        <div class="muted" style="font-size:12px;margin:6px 0 10px">
+          Last 30 days. Blue = miles driven (odometer delta).
+          Green = kWh added to the pack (charge_energy_added delta — does not include grid losses).
+        </div>
+        <div id="daily-chart"></div>
       </div>
 
       <div class="card col-12">
@@ -346,11 +355,61 @@
         </div>`).join("");
     }
 
+    function renderDailyChart(rows) {
+      const el = $("daily-chart");
+      if (!rows || !rows.length) { el.innerHTML = '<div class="empty">No data yet.</div>'; return; }
+      const W = 1200, H = 240, P = { l: 50, r: 50, t: 12, b: 32 };
+      const maxMi  = Math.max(1, ...rows.map(r => r.miles));
+      const maxKwh = Math.max(1, ...rows.map(r => r.kwh));
+      const innerW = W - P.l - P.r;
+      const innerH = H - P.t - P.b;
+      const groupW = innerW / rows.length;
+      const barW = Math.max(3, (groupW - 4) / 2);
+      const milesColor = "#4a7da8";
+      const kwhColor   = "#5d8a4f";
+
+      let svg = "";
+      // gridlines
+      for (let i = 0; i <= 4; i++) {
+        const y = P.t + (innerH * i) / 4;
+        svg += `<line x1="${P.l}" y1="${y}" x2="${W-P.r}" y2="${y}" stroke="rgba(61,107,84,0.18)"/>`;
+        svg += `<text x="${P.l-6}" y="${y+4}" text-anchor="end" fill="${milesColor}" font-size="11">${Math.round(maxMi*(1-i/4))}</text>`;
+        svg += `<text x="${W-P.r+6}" y="${y+4}" text-anchor="start" fill="${kwhColor}" font-size="11">${(maxKwh*(1-i/4)).toFixed(0)}</text>`;
+      }
+      // bars
+      rows.forEach((d, i) => {
+        const x0 = P.l + groupW * i + 2;
+        const hMi  = (d.miles / maxMi)  * innerH;
+        const hKwh = (d.kwh   / maxKwh) * innerH;
+        svg += `<rect x="${x0.toFixed(1)}" y="${(P.t + innerH - hMi).toFixed(1)}" width="${barW.toFixed(1)}" height="${hMi.toFixed(1)}" fill="${milesColor}"><title>${d.date} · ${d.miles} mi</title></rect>`;
+        svg += `<rect x="${(x0+barW).toFixed(1)}" y="${(P.t + innerH - hKwh).toFixed(1)}" width="${barW.toFixed(1)}" height="${hKwh.toFixed(1)}" fill="${kwhColor}"><title>${d.date} · ${d.kwh} kWh</title></rect>`;
+        // sparse x-axis labels (every 5th day, plus first/last)
+        if (i === 0 || i === rows.length - 1 || i % 5 === 0) {
+          const xc = x0 + barW;
+          const lbl = d.date.slice(5);  // MM-DD
+          svg += `<text x="${xc.toFixed(1)}" y="${H - P.b + 16}" text-anchor="middle" fill="#8a948f" font-size="10">${lbl}</text>`;
+        }
+      });
+      // axis labels
+      svg += `<text x="${P.l-30}" y="${P.t-2}" fill="${milesColor}" font-size="11">mi</text>`;
+      svg += `<text x="${W-P.r+30}" y="${P.t-2}" fill="${kwhColor}" font-size="11" text-anchor="end">kWh</text>`;
+      el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:240px;display:block">${svg}</svg>`;
+    }
+
+    async function loadDailyChart() {
+      try {
+        const r = await fetch("/api/daily-usage?days=30");
+        const j = await r.json();
+        renderDailyChart(j.days || []);
+      } catch (e) { /* leave card empty */ }
+    }
+
     async function load() {
       const r = await fetch("/api/roi");
       LAST_DATA = await r.json();
       renderAll();
       loadPerDriver();
+      loadDailyChart();
     }
 
     window.refresh = (typeof load === "function") ? load : null;
