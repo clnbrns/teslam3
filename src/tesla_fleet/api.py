@@ -1462,7 +1462,14 @@ def api_trips(limit: int = 50, driver: str | None = None) -> dict:
     if driver:
         trips = [t for t in trips if (t.get("driver") or "").lower() == driver.lower()]
     trips.sort(key=lambda t: -t["start_ts"])  # newest first
-    return {"trips": trips[:limit], "count": len(trips), "cost_per_mile": round(cost_per_mi, 4)}
+    return {
+        "trips": trips[:limit],
+        "count": len(trips),
+        "cost_per_mile": round(cost_per_mi, 4),
+        # Fleet-wide avg efficiency; the trips page uses this with a per-trip
+        # speed-adjustment curve to estimate MPGe for each individual trip.
+        "fleet_mi_per_kwh": round(mi_per_kwh, 2),
+    }
 
 
 def _finalize_trip(cur: dict, cost_per_mi: float) -> dict:
