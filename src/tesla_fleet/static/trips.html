@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Trips</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260526-131028" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260526-131300" />
 <style>
   .trip {
     display: grid;
@@ -44,8 +44,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260526-131028" defer></script>
-  <script src="/static/mobile.js?v=20260526-131028" defer></script>
+  <script src="/static/nav.js?v=20260526-131300" defer></script>
+  <script src="/static/mobile.js?v=20260526-131300" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -112,8 +112,13 @@
     // sub-25 mph (regen-heavy) and 25-45 mph (city sweet spot) get a boost,
     // 60+ mph (aero drag) takes a haircut.
     function tripMpge(t) {
+      // Need at least miles to be meaningful — pure zero-mile parked trips
+      // shouldn't claim an efficiency number.
+      if (!t.miles_est || t.miles_est <= 0) return null;
       const avg = t.avg_speed_mph;
-      if (avg == null || avg <= 0) return null;
+      // Segment trips (odometer-synthesized, no per-second telemetry) have
+      // no avg_speed_mph. Show fleet average MPGe without the speed curve.
+      if (avg == null || avg <= 0) return fleetMiPerKwh * KWH_PER_GAL;
       let factor;
       if (avg < 25) factor = 1.05;
       else if (avg < 45) factor = 1.10;
