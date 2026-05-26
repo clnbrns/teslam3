@@ -4,11 +4,11 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Trips</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260523-113757" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260523-114228" />
 <style>
   .trip {
     display: grid;
-    grid-template-columns: 200px 1fr 80px 90px 80px 90px;
+    grid-template-columns: 200px 1fr 80px 70px 90px 80px 90px;
     gap: 14px; align-items: center;
     padding: 12px 16px;
     border-bottom: 1px solid var(--matte-green-line);
@@ -27,6 +27,8 @@
   .trip .driver.carson { color: var(--caliper-red); }
   .trip .num { text-align: right; font-variant-numeric: tabular-nums; }
   .trip .mi { color: var(--text); }
+  .trip .mpge { color: var(--text-dim); font-size: 12px; }
+  .trip .mpge .unit { font-size: 10px; color: var(--text-dim); margin-left: 2px; }
   .trip .speed { color: var(--text-dim); font-size: 12px; }
   .trip .cost { color: var(--matte-green-soft); font-weight: 600; }
   .trip .events { font-size: 11px; color: var(--text-dim); text-align: right; }
@@ -42,8 +44,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260523-113757" defer></script>
-  <script src="/static/mobile.js?v=20260523-113757" defer></script>
+  <script src="/static/nav.js?v=20260523-114228" defer></script>
+  <script src="/static/mobile.js?v=20260523-114228" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -87,6 +89,7 @@
         <span>When</span>
         <span>Driver</span>
         <span class="num">Miles</span>
+        <span class="num" title="Miles per gallon equivalent. (mi/kWh) × 33.7, speed-adjusted per trip.">MPGe</span>
         <span class="num">Avg / Max</span>
         <span class="num">Cost</span>
         <span class="num">Events</span>
@@ -99,6 +102,26 @@
     const $ = (id) => document.getElementById(id);
     const fmt = (n, d=0) => (n == null) ? "—" :
       Number(n).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+    // Fleet-wide mi/kWh, populated from /api/trips. Defaults to 3.0 until load.
+    let fleetMiPerKwh = 3.0;
+    const KWH_PER_GAL = 33.7;  // EPA: 1 gal of gas ≡ 33.7 kWh
+
+    // Per-trip MPGe estimate: fleet mi/kWh × 33.7, adjusted by avg trip speed.
+    // We don't track kWh per trip directly, so this curve is an approximation:
+    // sub-25 mph (regen-heavy) and 25-45 mph (city sweet spot) get a boost,
+    // 60+ mph (aero drag) takes a haircut.
+    function tripMpge(t) {
+      const avg = t.avg_speed_mph;
+      if (avg == null || avg <= 0) return null;
+      let factor;
+      if (avg < 25) factor = 1.05;
+      else if (avg < 45) factor = 1.10;
+      else if (avg < 60) factor = 1.00;
+      else if (avg < 75) factor = 0.90;
+      else factor = 0.80;
+      return fleetMiPerKwh * factor * KWH_PER_GAL;
+    }
 
     function fmtTs(ts) {
       const d = new Date(ts * 1000);
@@ -121,10 +144,15 @@
           ? `${t.hard_brakes ? `<span class="b">⤓${t.hard_brakes}</span>` : ""}${t.rapid_accels ? `<span class="a">⤒${t.rapid_accels}</span>` : ""}`
           : '<span class="muted">clean</span>';
       const tripUrl = `/trip?start=${Math.floor(t.start_ts)}`;
+      const mpge = tripMpge(t);
+      const mpgeCol = mpge == null
+        ? '<span class="muted">—</span>'
+        : `${fmt(mpge, 0)}<span class="unit">MPGe</span>`;
       return `<a href="${tripUrl}" class="trip ${isSeg ? 'seg' : ''}" style="text-decoration:none">
         <div class="when"><div class="day">${w.day}</div><div class="time">${w.time} · ${fmt(t.duration_minutes,0)} min</div></div>
         <div class="driver ${dCls}">${t.driver}</div>
         <div class="num mi">${fmt(t.miles_est,1)}</div>
+        <div class="num mpge">${mpgeCol}</div>
         <div class="num speed">${speedCol}</div>
         <div class="num cost">$${fmt(t.cost_usd,2)}</div>
         <div class="events">${eventsCol}</div>
@@ -135,6 +163,7 @@
       const driver = $("driver-filter").value;
       const url = "/api/trips?limit=200" + (driver ? `&driver=${driver}` : "");
       const r = await fetch(url); const d = await r.json();
+      if (d.fleet_mi_per_kwh) fleetMiPerKwh = d.fleet_mi_per_kwh;
       $("trips").innerHTML = d.trips.length
         ? d.trips.map(row).join("")
         : '<div class="empty">No trips detected.</div>';
