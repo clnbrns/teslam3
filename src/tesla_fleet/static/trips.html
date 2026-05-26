@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <title>Goblin M3P · Trips</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="/static/dashboard.css?v=20260523-114228" />
+<link rel="stylesheet" href="/static/dashboard.css?v=20260526-101922" />
 <style>
   .trip {
     display: grid;
@@ -44,8 +44,8 @@
 </style>
 </head>
 <body>
-  <script src="/static/nav.js?v=20260523-114228" defer></script>
-  <script src="/static/mobile.js?v=20260523-114228" defer></script>
+  <script src="/static/nav.js?v=20260526-101922" defer></script>
+  <script src="/static/mobile.js?v=20260526-101922" defer></script>
   <nav class="nav">
     <a href="/" class="brand" style="text-decoration:none;color:inherit">GOBLIN M3P</a>
     <span class="nav-group">
@@ -150,13 +150,42 @@
         : `${fmt(mpge, 0)}<span class="unit">MPGe</span>`;
       return `<a href="${tripUrl}" class="trip ${isSeg ? 'seg' : ''}" style="text-decoration:none">
         <div class="when"><div class="day">${w.day}</div><div class="time">${w.time} · ${fmt(t.duration_minutes,0)} min</div></div>
-        <div class="driver ${dCls}">${t.driver}</div>
+        <div class="driver ${dCls}" data-start="${Math.floor(t.start_ts)}" data-driver="${t.driver || ''}"
+             title="Click to reassign driver"
+             style="text-decoration:underline dotted;text-underline-offset:3px;cursor:pointer"
+             onclick="event.preventDefault();event.stopPropagation();reassignDriver(this);">${t.driver || '—'}</div>
         <div class="num mi">${fmt(t.miles_est,1)}</div>
         <div class="num mpge">${mpgeCol}</div>
         <div class="num speed">${speedCol}</div>
         <div class="num cost">$${fmt(t.cost_usd,2)}</div>
         <div class="events">${eventsCol}</div>
       </a>`;
+    }
+
+    async function reassignDriver(el) {
+      const startTs = el.dataset.start;
+      const current = el.dataset.driver || "";
+      const drivers = ["Colin", "Lindsey", "Carson"];
+      const hint = drivers.filter(d => d !== current).join(", ");
+      const pick = window.prompt(
+        `Reassign driver.\nCurrent: ${current || "—"}\nType: ${hint} (or any name)`,
+        current
+      );
+      if (!pick || pick.trim() === current) return;
+      const driver = pick.trim();
+      const res = await fetch(`/api/trip/${startTs}/driver`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({driver}),
+      });
+      if (!res.ok) { alert("Failed to reassign: " + res.status); return; }
+      // Update in place: text, color class, and dataset for next click.
+      el.textContent = driver;
+      el.dataset.driver = driver;
+      el.className = "driver " + driver.toLowerCase();
+      el.style.textDecoration = "underline dotted";
+      el.style.textUnderlineOffset = "3px";
+      el.style.cursor = "pointer";
     }
 
     async function load() {
