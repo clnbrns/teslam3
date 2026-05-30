@@ -1347,24 +1347,30 @@ def api_daily_usage(days: int = 30) -> dict:
 
 
 @app.get("/api/gps/all")
-def api_gps_all(limit: int = 5000, driver: str | None = None) -> dict:
+def api_gps_all(limit: int = 25000, driver: str | None = None) -> dict:
     """Return all GPS points across the database for the Map page.
     Filters at SQL level to GPS-bearing rows; the historical import has 135K
     rows without GPS, so a naive ORDER BY ASC LIMIT misses live data entirely.
     Optional ``driver`` query filters to one driver's samples only.
+
+    We use DESC + subquery so the most-recent ``limit`` points are returned
+    (the oldest drives fall off, not the newest ones).
     """
     with db.connect() as conn:
-        sql = (
-            "SELECT ts, type, payload FROM events"
-            " WHERE type IN ('driver_sample', 'heartbeat')"
+        # Fetch most-recent N points (DESC), then re-sort ASC for the map
+        # so the heatmap sessions render in chronological order.
+        inner = (
+            "SELECT ts, payload FROM events"
+            " WHERE type IN ('driver_sample', 'heartbeat', 'manual_refresh')"
             " AND json_extract(payload, '$.gps.lat') IS NOT NULL"
         )
         params: list = []
         if driver:
-            sql += " AND LOWER(driver) = LOWER(?)"
+            inner += " AND LOWER(driver) = LOWER(?)"
             params.append(driver)
-        sql += " ORDER BY ts ASC LIMIT ?"
+        inner += " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
+        sql = f"SELECT ts, payload FROM ({inner}) ORDER BY ts ASC"
         rows = conn.execute(sql, params).fetchall()
     points: list[dict] = []
     for r in rows:
