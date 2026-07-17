@@ -11,6 +11,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -42,6 +43,26 @@ CREATE TABLE IF NOT EXISTS charging_sessions (
     charger_type TEXT,
     location TEXT,
     PRIMARY KEY (vin, end_ts)
+);
+
+-- In-flight charging session (one per VIN); survives poller restarts.
+-- Finalized rows move to charging_sessions and this row is cleared.
+CREATE TABLE IF NOT EXISTS charge_session_state (
+    vin TEXT PRIMARY KEY,
+    start_ts REAL NOT NULL,
+    last_ts REAL NOT NULL,
+    energy_kwh REAL NOT NULL DEFAULT 0,
+    charger_type TEXT,
+    location TEXT,
+    lat REAL,
+    lon REAL
+);
+
+-- Reverse-geocode cache: one row per ~100m lat/lon cell.
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    cell TEXT PRIMARY KEY,
+    name TEXT,
+    fetched_at REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS roi_state (
@@ -145,6 +166,53 @@ def record_charging(conn: sqlite3.Connection, session: dict) -> bool:
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+def get_charge_state(conn: sqlite3.Connection, vin: str) -> dict | None:
+    """In-flight charging session for a VIN, or None."""
+    row = conn.execute(
+        "SELECT start_ts, last_ts, energy_kwh, charger_type, location, lat, lon"
+        " FROM charge_session_state WHERE vin = ?", (vin,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def save_charge_state(conn: sqlite3.Connection, vin: str, state: dict) -> None:
+    conn.execute(
+        "INSERT INTO charge_session_state(vin, start_ts, last_ts, energy_kwh,"
+        " charger_type, location, lat, lon) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(vin) DO UPDATE SET last_ts=excluded.last_ts,"
+        " energy_kwh=excluded.energy_kwh, charger_type=excluded.charger_type,"
+        " location=excluded.location, lat=excluded.lat, lon=excluded.lon",
+        (vin, state["start_ts"], state["last_ts"], state.get("energy_kwh") or 0,
+         state.get("charger_type"), state.get("location"),
+         state.get("lat"), state.get("lon")),
+    )
+
+
+def clear_charge_state(conn: sqlite3.Connection, vin: str) -> None:
+    conn.execute("DELETE FROM charge_session_state WHERE vin = ?", (vin,))
+
+
+def geocode_get(conn: sqlite3.Connection, cell: str, max_age_s: float) -> str | None:
+    """Cached place name for a lat/lon cell; empty string = known-unresolvable."""
+    row = conn.execute(
+        "SELECT name, fetched_at FROM geocode_cache WHERE cell = ?", (cell,)
+    ).fetchone()
+    if row is None:
+        return None
+    if time.time() - row["fetched_at"] > max_age_s:
+        return None
+    return row["name"] if row["name"] is not None else ""
+
+
+def geocode_put(conn: sqlite3.Connection, cell: str, name: str | None) -> None:
+    conn.execute(
+        "INSERT INTO geocode_cache(cell, name, fetched_at) VALUES (?, ?, ?)"
+        " ON CONFLICT(cell) DO UPDATE SET name=excluded.name,"
+        " fetched_at=excluded.fetched_at",
+        (cell, name, time.time()),
+    )
 
 
 def get_roi(conn: sqlite3.Connection, vin: str = "") -> dict:

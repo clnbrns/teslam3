@@ -146,6 +146,9 @@ def telemetry_register(
     vin: str,
     hostname: str = typer.Option("", help="FTS hostname the car will push to"),
     proxy: str = typer.Option("", help="Vehicle Command Proxy URL (required for new configs)"),
+    speculative: bool = typer.Option(
+        False, help="Also register unverified field names (pedals, cabin camera). "
+                    "One unknown field fails the whole config — confirm names first."),
 ) -> None:
     """Register a telemetry streaming config for VIN at hostname.
 
@@ -164,7 +167,10 @@ def telemetry_register(
                 raise typer.BadParameter("Pass --hostname or set TESLA_PUBLIC_HOSTNAME")
             if not proxy_url:
                 typer.echo("warning: no --proxy; Tesla will reject with 400", err=True)
-            typer.echo(json.dumps(await t.register(client, host, vin, proxy_url or None), indent=2))
+            typer.echo(json.dumps(
+                await t.register(client, host, vin, proxy_url or None,
+                                 include_speculative=speculative),
+                indent=2))
 
     asyncio.run(_run())
 

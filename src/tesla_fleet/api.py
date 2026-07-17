@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import asyncio
 import base64
@@ -18,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from tesla_fleet import db, osm, telemetry
+from tesla_fleet import alerts, attribution, charging, db, geocode, osm, telemetry
 from tesla_fleet.auth import build_authorize_url
 from tesla_fleet.client import TeslaFleetClient
 from tesla_fleet.config import Settings
@@ -30,6 +31,34 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# All "overnight" / daily-bucket logic is family-local time, independent of
+# the container's TZ setting (Railway defaults to UTC).
+LOCAL_TZ = ZoneInfo(os.environ.get("FLEET_LOCAL_TZ", "America/Chicago"))
+
+
+def _local_now() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
+
+def _seconds_until_local(hour: int) -> float:
+    """Seconds from now until the next occurrence of ``hour``:00 local time."""
+    now = _local_now()
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def _seconds_until_weekly(weekday: int, hour: int) -> float:
+    """Seconds until the next ``weekday`` (Mon=0 … Sun=6) at ``hour``:00 local."""
+    now = _local_now()
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    days_ahead = (weekday - now.weekday()) % 7
+    target += timedelta(days=days_ahead)
+    if target <= now:
+        target += timedelta(days=7)
+    return (target - now).total_seconds()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,12 +67,11 @@ async def lifespan(app: FastAPI):
     db.init()
     # Active-driver override: set via POST /api/active-driver, used by the
     # poller when writing samples. Persists in /data so it survives restarts.
+    # Overrides now expire (attribution.OVERRIDE_TTL_S); past that, schedule
+    # rules and the learned hour-of-week prior take over.
     driver_path = Path(app.state.settings.token_store_path).parent / ".active_driver"
     app.state.driver_path = driver_path
-    try:
-        app.state.active_driver = driver_path.read_text().strip() or app.state.settings.default_driver
-    except FileNotFoundError:
-        app.state.active_driver = app.state.settings.default_driver
+    app.state.driver_override = attribution.load_override(driver_path)
 
     # Background poller — captures live drives into SQLite.
     app.state.poll_task = None
@@ -55,15 +83,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("TESLA_VIN not set; background poller disabled")
 
+    # Weekly driver digest (no-op sends unless NTFY_TOPIC is configured).
+    app.state.digest_task = asyncio.create_task(_weekly_digest_loop())
+
     try:
         yield
     finally:
-        if app.state.poll_task:
-            app.state.poll_task.cancel()
-            try:
-                await app.state.poll_task
-            except asyncio.CancelledError:
-                pass
+        for task in (app.state.poll_task, app.state.digest_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 app = FastAPI(title="Goblin M3P", lifespan=lifespan)
@@ -202,9 +234,26 @@ def healthz() -> dict:
     return {"ok": True}
 
 
+def _resolved_driver(conn, ts: float | None = None) -> tuple[str | None, str]:
+    """(driver, source) for a sample at ts: manual → schedule → learned → default."""
+    return attribution.resolve(
+        conn, ts if ts is not None else time.time(),
+        getattr(app.state, "driver_override", {}) or {},
+        app.state.settings.default_driver,
+    )
+
+
 @app.get("/api/active-driver")
 def get_active_driver() -> dict:
-    return {"driver": app.state.active_driver,
+    with db.connect() as conn:
+        driver, source = _resolved_driver(conn)
+    override = getattr(app.state, "driver_override", {}) or {}
+    expires_in = None
+    if source == "manual" and override.get("set_at"):
+        expires_in = max(0, int(attribution.OVERRIDE_TTL_S - (time.time() - override["set_at"])))
+    return {"driver": driver,
+            "source": source,          # manual | schedule | learned | default
+            "override_expires_in_s": expires_in,
             "options": ["Colin", "Lindsey", "Carson"]}
 
 
@@ -229,11 +278,13 @@ async def api_poll_now() -> dict:
     veh = data.get("vehicle_state") or {}
     charge = data.get("charge_state") or {}
     now = time.time()
+    with db.connect() as conn:
+        resolved_driver, _src = _resolved_driver(conn, now)
     record = {
         "type": "manual_refresh",
         "ts": now,
         "vin": vin,
-        "driver": getattr(app.state, "active_driver", None),
+        "driver": resolved_driver,
         "speed_mph": drive.get("speed"),
         "shift_state": drive.get("shift_state"),
         "battery_level": charge.get("battery_level"),
@@ -249,6 +300,14 @@ async def api_poll_now() -> dict:
         kwh = charge.get("charge_energy_added")
         if odo is not None or kwh is not None:
             db.update_roi(conn, vin, odometer_mi=odo, charge_energy_added_kwh=kwh)
+        charging.observe(
+            conn, vin,
+            ts=now,
+            charging_state=charge.get("charging_state"),
+            charge_energy_added=kwh,
+            fast_charger_present=charge.get("fast_charger_present"),
+            lat=drive.get("latitude"), lon=drive.get("longitude"),
+        )
     return {"ok": True, **{k: v for k, v in record.items() if k != "gps"}}
 
 
@@ -257,12 +316,14 @@ async def set_active_driver(req: Request) -> dict:
     body = await req.json()
     driver = (body.get("driver") or "").strip()
     if driver:
-        app.state.active_driver = driver
         try:
-            app.state.driver_path.write_text(driver)
+            app.state.driver_override = attribution.save_override(
+                app.state.driver_path, driver)
         except Exception:
             logger.exception("failed to persist active driver")
-    return {"driver": app.state.active_driver}
+            app.state.driver_override = {"driver": driver, "set_at": time.time()}
+    return {"driver": driver or (app.state.driver_override or {}).get("driver"),
+            "source": "manual"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -420,6 +481,8 @@ async def telemetry_ingest(req: Request) -> dict:
         if not secrets_mod.compare_digest(got, expected):
             raise HTTPException(401, "bad telemetry token")
     payload = await req.json()
+    with db.connect() as conn:
+        default_driver, _src = _resolved_driver(conn)
     # Two payload shapes are accepted:
     #   1. FTS HTTP dispatcher: {"vin": "...", "data": [{...}], "createdAt": ...}
     #      (legacy/pre-2026 shape — already handled by telemetry.ingest_payload)
@@ -427,13 +490,9 @@ async def telemetry_ingest(req: Request) -> dict:
     if isinstance(payload, list):
         written = 0
         for record in payload:
-            written += telemetry.ingest_payload(
-                record, default_driver=getattr(app.state, "active_driver", None),
-            )
+            written += telemetry.ingest_payload(record, default_driver=default_driver)
         return {"ok": True, "written": written, "batch_size": len(payload)}
-    written = telemetry.ingest_payload(
-        payload, default_driver=getattr(app.state, "active_driver", None),
-    )
+    written = telemetry.ingest_payload(payload, default_driver=default_driver)
     return {"ok": True, "written": written}
 
 
@@ -450,7 +509,9 @@ def public_key() -> str:
 # --- Dashboard data endpoints ---
 
 MPG_BASELINE = 28.0
-ELEC_PRICE = 0.134  # blended home rate, Fort Worth
+# Home rate — used for per-mile trip costing. Session-level costs use
+# charging.rate_for() so Supercharger kWh are priced at DC-fast rates.
+ELEC_PRICE = charging.HOME_RATE
 
 # --- Per-mile operating cost model (M3 Performance) ---
 # Electricity: 3.0 mi/kWh real-world avg → ~$0.045/mi
@@ -511,7 +572,8 @@ def api_roi() -> dict:
 
     lifetime_kwh = sum(s["energy_kwh"] for s in sessions)
     lifetime_miles_est = lifetime_kwh * mi_per_kwh
-    elec_cost = lifetime_kwh * ELEC_PRICE
+    # Per-session pricing: Supercharger kWh cost DC-fast rates, not home rates.
+    elec_cost = sum(charging.session_cost(s) for s in sessions)
     tesla_maint_cost = lifetime_miles_est * TESLA_MAINT_PER_MI
     tesla_one_offs = sum(e["amount"] for e in TESLA_EXPENSES)
     tesla_total_cost = elec_cost + tesla_maint_cost + tesla_one_offs
@@ -528,8 +590,9 @@ def api_roi() -> dict:
         ts = s["end_ts"]
         kwh = s["energy_kwh"]
         regular_price = price_for(ts)
+        sess_rate = charging.rate_for(s.get("charger_type"), s.get("location"))
         miles = kwh * mi_per_kwh
-        sess_elec = kwh * ELEC_PRICE
+        sess_elec = kwh * sess_rate
         sess_tesla_maint = miles * TESLA_MAINT_PER_MI
         sess_tesla_total = sess_elec + sess_tesla_maint
         cumulative_tesla += sess_tesla_total
@@ -537,11 +600,11 @@ def api_roi() -> dict:
         per_comp = {}
         for v in COMPARISONS:
             if v.fuel == "electric":
-                # Electric peer: same kWh price, but the peer's efficiency
-                # determines kWh used to cover the same miles.
+                # Electric peer: same charging venue (and thus rate), but the
+                # peer's efficiency determines kWh to cover the same miles.
                 kwh_for_peer = miles / v.mi_per_kwh if v.mi_per_kwh else kwh
-                sess_fuel = kwh_for_peer * ELEC_PRICE
-                gp_or_kwh = ELEC_PRICE
+                sess_fuel = kwh_for_peer * sess_rate
+                gp_or_kwh = sess_rate
             else:
                 gp_or_kwh = fuel_price(ts, v.fuel, regular_price)
                 sess_fuel = (miles / v.mpg) * gp_or_kwh
@@ -620,6 +683,11 @@ def api_roi() -> dict:
             "gas_price_source": "DFW weekly avg, per-session historical",
             "mpg_baseline": headline["mpg"],
             "elec_price_per_kwh": ELEC_PRICE,
+            "elec_rates": {
+                "home": charging.HOME_RATE,
+                "supercharger": charging.SUPERCHARGER_RATE,
+                "away_ac": charging.AWAY_AC_RATE,
+            },
             "mi_per_kwh": round(mi_per_kwh, 3),
             "mi_per_kwh_source": sample_label,
             "tesla_maint_per_mi": TESLA_MAINT_PER_MI,
@@ -691,7 +759,7 @@ def api_charging() -> dict:
 
     for s in sessions:
         kwh = s["energy_kwh"] or 0
-        cost = kwh * ELEC_PRICE
+        cost = charging.session_cost(s)
         loc = s.get("location") or "Unknown"
         ct = _norm_charger(s.get("charger_type"))
         by_location[loc]["sessions"] += 1
@@ -729,7 +797,12 @@ def api_charging() -> dict:
                     for w, v in sorted(weekly.items())],
         "speed_distribution": _bucket_speeds(speeds),
         "total_kwh": round(sum(s["energy_kwh"] for s in sessions), 1),
-        "total_cost": round(sum(s["energy_kwh"] * ELEC_PRICE for s in sessions), 2),
+        "total_cost": round(sum(charging.session_cost(s) for s in sessions), 2),
+        "rates": {
+            "home": charging.HOME_RATE,
+            "supercharger": charging.SUPERCHARGER_RATE,
+            "away_ac": charging.AWAY_AC_RATE,
+        },
     }
 
 
@@ -823,7 +896,7 @@ def api_per_driver_cost() -> dict:
     # the per-driver report, since sample density tracks drive time.
     total_samples = sum(r["samples"] for r in rows)
     lifetime_kwh = sum(s["energy_kwh"] for s in sessions)
-    lifetime_cost = lifetime_kwh * ELEC_PRICE
+    lifetime_cost = sum(charging.session_cost(s) for s in sessions)
     sample_miles = totals["total_miles"]
     sample_kwh = totals["total_kwh"]
     mi_per_kwh = (sample_miles / sample_kwh) if sample_kwh > 0 else 3.0
@@ -926,12 +999,16 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
                         "start_battery": last_bat, "end_battery": bat,
                         "miles_est": d_mi, "source": source,
                         "drivers": [],
+                        "start_gps": last_p.get("gps") or p.get("gps"),
+                        "end_gps": p.get("gps"),
                     }
                 else:
                     cur["end_ts"] = ts
                     cur["end_odo"] = odo
                     cur["end_battery"] = bat
                     cur["miles_est"] += d_mi
+                    if p.get("gps"):
+                        cur["end_gps"] = p.get("gps")
                     if cur["source"] != source:
                         cur["source"] = "mixed"
                 # Collect driver attribution from both endpoints of the delta.
@@ -973,6 +1050,8 @@ def _derive_odometer_segments(conn, cost_per_mi: float, mi_per_kwh: float) -> li
             "source": s["source"],
             "cost_usd": cost["total_usd"],
             "cost_breakdown": cost,
+            "start_gps": s.get("start_gps"),
+            "end_gps": s.get("end_gps"),
         })
     return out
 
@@ -1023,6 +1102,8 @@ async def api_trip_set_driver(start_ts: int, req: Request) -> dict:
             except Exception:
                 continue
         conn.commit()
+    # Manual corrections are training data for the learned prior.
+    attribution.invalidate_prior()
     logger.info("reassigned trip %s → %s (%d rows)", start_ts, driver, cur.rowcount)
     return {"ok": True, "driver": driver, "rows": cur.rowcount,
             "start_ts": start_ts, "end_ts": end_ts}
@@ -1424,6 +1505,7 @@ def api_trips(limit: int = 50, driver: str | None = None) -> dict:
         speed = payload.get("speed_mph")
         ev = payload.get("event") or {}
 
+        gps = payload.get("gps")
         if cur is None or (ts - cur["last_ts"]) > GAP or cur["driver"] != d:
             if cur and cur["samples"] > 5:
                 trips.append(_finalize_trip(cur, cost_per_mi))
@@ -1431,9 +1513,14 @@ def api_trips(limit: int = 50, driver: str | None = None) -> dict:
                 "driver": d, "first_ts": ts, "last_ts": ts,
                 "samples": 0, "max_speed": 0, "speed_sum": 0, "speed_n": 0,
                 "brakes": 0, "accels": 0,
+                "start_gps": gps, "end_gps": gps,
             }
         cur["last_ts"] = ts
         cur["samples"] += 1
+        if gps:
+            if not cur.get("start_gps"):
+                cur["start_gps"] = gps
+            cur["end_gps"] = gps
         if speed is not None:
             cur["max_speed"] = max(cur["max_speed"], speed)
             cur["speed_sum"] += speed
@@ -1468,14 +1555,55 @@ def api_trips(limit: int = 50, driver: str | None = None) -> dict:
     if driver:
         trips = [t for t in trips if (t.get("driver") or "").lower() == driver.lower()]
     trips.sort(key=lambda t: -t["start_ts"])  # newest first
+
+    # Reverse-geocode start/end labels for the returned page only. Budgeted:
+    # a cold cache resolves a few more cells on each auto-refresh until warm.
+    page = trips[:limit]
+    budget = geocode.Budget(8)
+    with db.connect() as conn:
+        for t in page:
+            sg = t.get("start_gps") or {}
+            eg = t.get("end_gps") or {}
+            t["start_place"] = geocode.resolve(conn, sg.get("lat"), sg.get("lon"), budget)
+            t["end_place"] = geocode.resolve(conn, eg.get("lat"), eg.get("lon"), budget)
+
     return {
-        "trips": trips[:limit],
+        "trips": page,
         "count": len(trips),
         "cost_per_mile": round(cost_per_mi, 4),
         # Fleet-wide avg efficiency; the trips page uses this with a per-trip
         # speed-adjustment curve to estimate MPGe for each individual trip.
         "fleet_mi_per_kwh": round(mi_per_kwh, 2),
     }
+
+
+@app.get("/api/places")
+def api_places(days: int = 90, limit: int = 15) -> dict:
+    """Frequent places: where trips start and end, grouped by ~100 m cell.
+
+    Reuses the trip detector, so 'places' means dwell locations (endpoints),
+    not points passed through. Labels resolve from the geocode cache with a
+    small fetch budget — top places warm up first.
+    """
+    data = api_trips(limit=1000)
+    cutoff = time.time() - max(1, min(int(days), 365)) * 86400
+    counts: dict[str, dict] = {}
+    for t in data["trips"]:
+        if t["start_ts"] < cutoff:
+            continue
+        for g in (t.get("start_gps"), t.get("end_gps")):
+            if not g or g.get("lat") is None:
+                continue
+            key = geocode.cell_key(g["lat"], g["lon"])
+            c = counts.setdefault(key, {"cell": key, "lat": g["lat"],
+                                        "lon": g["lon"], "visits": 0})
+            c["visits"] += 1
+    top = sorted(counts.values(), key=lambda c: -c["visits"])[:limit]
+    budget = geocode.Budget(10)
+    with db.connect() as conn:
+        for c in top:
+            c["place"] = geocode.resolve(conn, c["lat"], c["lon"], budget)
+    return {"places": top, "days": days}
 
 
 def _finalize_trip(cur: dict, cost_per_mi: float) -> dict:
@@ -1496,6 +1624,8 @@ def _finalize_trip(cur: dict, cost_per_mi: float) -> dict:
         "rapid_accels": cur["accels"],
         "cost_usd": cost["total_usd"],
         "cost_breakdown": cost,
+        "start_gps": cur.get("start_gps"),
+        "end_gps": cur.get("end_gps"),
     }
 
 
@@ -1578,6 +1708,93 @@ def api_report(driver: str) -> dict:
 
 
 # ============================================================
+#  Weekly driver digest — Sunday-evening push via ntfy
+# ============================================================
+
+DIGEST_DRIVERS = [d.strip() for d in
+                  os.environ.get("WEEKLY_DIGEST_DRIVERS", "Carson").split(",")
+                  if d.strip()]
+DIGEST_WEEKDAY = 6   # Sunday
+DIGEST_HOUR = 19     # 7 PM local
+
+
+def _week_stats(conn, driver: str, since: float) -> dict | None:
+    """Compact 7-day stats for one driver, from driver_sample events."""
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE type = 'driver_sample'"
+        " AND LOWER(driver) = LOWER(?) AND ts >= ? ORDER BY ts ASC",
+        (driver, since),
+    ).fetchall()
+    samples = []
+    for r in rows:
+        try:
+            samples.append(json.loads(r["payload"]))
+        except Exception:
+            continue
+    if not samples:
+        return None
+
+    speeds = [s["speed_mph"] for s in samples if s.get("speed_mph") is not None]
+    hard_brakes = sum(1 for s in samples if (s.get("event") or {}).get("type") == "hard_brake")
+    rapid_accels = sum(1 for s in samples if (s.get("event") or {}).get("type") == "rapid_accel")
+
+    drive_seconds = miles_est = 0.0
+    prev = None
+    for s in samples:
+        if (s.get("speed_mph") or 0) <= 1:
+            prev = None
+            continue
+        if prev is not None:
+            dt = s["ts"] - prev["ts"]
+            if 0 < dt < 300:
+                drive_seconds += dt
+                miles_est += ((s["speed_mph"] + prev["speed_mph"]) / 2) * (dt / 3600)
+        prev = s
+
+    score = max(0, min(100, 100 - 4 * hard_brakes - 3 * rapid_accels))
+    grade = ("A" if score >= 93 else "B" if score >= 85 else
+             "C" if score >= 75 else "D" if score >= 65 else "F")
+    return {
+        "samples": len(samples),
+        "miles": round(miles_est, 1),
+        "drive_minutes": round(drive_seconds / 60),
+        "max_speed": round(max(speeds), 0) if speeds else 0,
+        "hard_brakes": hard_brakes,
+        "rapid_accels": rapid_accels,
+        "score": score,
+        "grade": grade,
+    }
+
+
+def _send_weekly_digest() -> None:
+    since = time.time() - 7 * 86400
+    with db.connect() as conn:
+        for driver in DIGEST_DRIVERS:
+            s = _week_stats(conn, driver, since)
+            if s is None:
+                alerts.send(f"{driver} — weekly drive report",
+                            "No drives recorded this week.", tags="bar_chart,car")
+                continue
+            alerts.send(
+                f"{driver} — weekly drive report: {s['grade']} ({s['score']}/100)",
+                (f"{s['miles']} mi over {s['drive_minutes']} min\n"
+                 f"Max speed {s['max_speed']:.0f} mph\n"
+                 f"{s['hard_brakes']} hard brakes · {s['rapid_accels']} rapid accels"),
+                tags="bar_chart,car",
+            )
+
+
+async def _weekly_digest_loop() -> None:
+    while True:
+        await asyncio.sleep(_seconds_until_weekly(DIGEST_WEEKDAY, DIGEST_HOUR))
+        try:
+            _send_weekly_digest()
+        except Exception:
+            logger.exception("[digest] weekly digest failed")
+        await asyncio.sleep(120)  # step past the fire minute before rescheduling
+
+
+# ============================================================
 #  Background poller — fetches vehicle_data, derives events, persists to SQLite
 # ============================================================
 
@@ -1624,12 +1841,12 @@ async def _poll_loop(vin: str, interval: float) -> None:
     """Adaptive forever-loop. Burns API quota only when something is happening.
 
     Cadence:
-      - Driving (shift D/R or speed > 0):   30s   (the configured interval)
-      - Parked + online:                    5 min
-      - Asleep:                             30 min, cheap state-only check
-                                            (NEVER wake the car just to peek)
-      - Overnight (23:00–06:00 local):      cap at 1 hr unless we know it's
-                                            actively driving
+      - Driving (shift D/R or speed > 0):   90s
+      - Charging:                           15 min (bounded sessions, cheap)
+      - Parked + online:                    45 min
+      - Asleep:                             2 hr (NEVER wake the car to peek)
+      - Overnight (22:00–06:00 local):      sleep until 06:00 local
+      - Extended idle (>4 hr no movement):  3 hr, lets the car deep-sleep
     """
     last_speed = None
     last_ts = None
@@ -1641,11 +1858,12 @@ async def _poll_loop(vin: str, interval: float) -> None:
     # Tuned to hit ~$5/month Tesla Fleet API budget (was ~$15/mo before).
     # Each call costs ~$0.002, so monthly budget = ~2,500 calls = 83/day.
     DRIVING_INTERVAL = max(interval, 90)   # was 30s — accept lower granularity
+    CHARGING_INTERVAL = 15 * 60            # sessions are bounded; worth tracking
     PARKED_INTERVAL = 45 * 60              # was 5 min
     ASLEEP_INTERVAL = 2 * 3600             # was 30 min
-    OVERNIGHT_INTERVAL = 12 * 3600         # was 1 hr — skip the whole window
     EXTENDED_IDLE_AFTER = 4 * 3600         # 4 hr of no movement → extended-idle mode
-    EXTENDED_IDLE_INTERVAL = 24 * 3600     # once-daily check-in during long parks
+    EXTENDED_IDLE_INTERVAL = 3 * 3600      # was 24 hr — that left the whole next
+                                           # day unpolled after any evening park
     # Tracks last time the car was observed moving (speed > 0 or odometer changed).
     # When (now - last_movement) > EXTENDED_IDLE_AFTER, we ALSO back off to
     # EXTENDED_IDLE_INTERVAL even if Tesla reports state=online, so that our
@@ -1654,8 +1872,14 @@ async def _poll_loop(vin: str, interval: float) -> None:
     last_observed_odo: float | None = None
 
     def overnight() -> bool:
-        h = datetime.now().hour
+        # LOCAL time — the container runs UTC on Railway, and using the naive
+        # hour here previously blanked out 4 PM–4 AM Central (prime driving).
+        h = _local_now().hour
         return h >= 22 or h < 6
+
+    def overnight_sleep() -> float:
+        # Sleep until 06:00 local, not a flat interval that overshoots morning.
+        return _seconds_until_local(6)
 
     while True:
         try:
@@ -1665,10 +1889,10 @@ async def _poll_loop(vin: str, interval: float) -> None:
                 await asyncio.sleep(PARKED_INTERVAL)
                 continue
 
-            # Overnight kill-switch — skip polling entirely 22:00–06:00.
+            # Overnight kill-switch — skip polling entirely 22:00–06:00 local.
             # Saves ~8 hours × 60min/PARKED_INTERVAL = 11 calls/night = ~$0.66/mo.
             if overnight():
-                await asyncio.sleep(OVERNIGHT_INTERVAL)
+                await asyncio.sleep(overnight_sleep())
                 continue
 
             client = TeslaFleetClient(app.state.settings, token, app.state.store)
@@ -1684,7 +1908,7 @@ async def _poll_loop(vin: str, interval: float) -> None:
                     if "404" in msg or "408" in msg or "asleep" in msg.lower():
                         # Car went to sleep between probe and read — back off,
                         # don't wake it.
-                        sleep_for = OVERNIGHT_INTERVAL if overnight() else ASLEEP_INTERVAL
+                        sleep_for = overnight_sleep() if overnight() else ASLEEP_INTERVAL
                         await asyncio.sleep(sleep_for)
                         continue
                     raise
@@ -1705,21 +1929,19 @@ async def _poll_loop(vin: str, interval: float) -> None:
             # Carry-forward driver from active key.
             key_id = veh.get("active_route_destination") or None  # placeholder fallback
             ap_key = veh.get("driver_temp_setting") or None        # placeholder fallback
-            # Real Tesla field for active key device id varies; the export uses
-            # "Identity of the Active Key Device" which isn't present in the
-            # vehicle_data REST response. As a pragmatic substitute, we keep
-            # whatever the importer set last and note it in the payload's
-            # active_driver_profile field, falling back to the configured default.
-            # Active-driver hierarchy:
+            # Active-driver hierarchy (see attribution.py):
             #   1. Tesla-reported active_driver_profile (rare in vehicle_data)
-            #   2. UI-set override (POST /api/active-driver, persisted to /data)
-            #   3. Configured default_driver
+            #   2. Fresh UI override (POST /api/active-driver, 12 h TTL)
+            #   3. Schedule rules (/data/driver_schedule.json)
+            #   4. Learned hour-of-week prior from historical samples
+            #   5. Configured default_driver
             profile = (veh.get("active_driver_profile")
-                       or data.get("active_driver_profile")
-                       or getattr(app.state, "active_driver", None)
-                       or app.state.settings.default_driver)
+                       or data.get("active_driver_profile"))
             if profile:
                 current_driver = profile
+            else:
+                with db.connect() as conn:
+                    current_driver, _src = _resolved_driver(conn, now)
 
             # Detect brake/accel from speed delta.
             event = None
@@ -1759,17 +1981,27 @@ async def _poll_loop(vin: str, interval: float) -> None:
                 }
                 with db.connect() as conn:
                     db.record_event(conn, record)
+                if is_drive_sample:
+                    alerts.maybe_alert_sample(record)
                 if is_heartbeat:
                     last_heartbeat = now
 
-            # Update odometer + charging totals.
-            if odometer_mi is not None or energy_added is not None:
-                with db.connect() as conn:
+            # Update odometer + charging totals, and track live charge sessions.
+            with db.connect() as conn:
+                if odometer_mi is not None or energy_added is not None:
                     db.update_roi(
                         conn, vin,
                         odometer_mi=odometer_mi,
                         charge_energy_added_kwh=energy_added,
                     )
+                charging.observe(
+                    conn, vin,
+                    ts=now,
+                    charging_state=charge.get("charging_state"),
+                    charge_energy_added=energy_added,
+                    fast_charger_present=charge.get("fast_charger_present"),
+                    lat=lat, lon=lon,
+                )
 
             consecutive_errors = 0
 
@@ -1791,8 +2023,12 @@ async def _poll_loop(vin: str, interval: float) -> None:
             extended_idle = (now - last_movement_ts) > EXTENDED_IDLE_AFTER
 
             # Pick next-tick cadence based on what we just saw.
+            is_charging = (charge.get("charging_state") or "").lower() == "charging"
             if is_drive_sample:
                 next_sleep = DRIVING_INTERVAL
+            elif is_charging:
+                # Track the session so it closes with an accurate kWh figure.
+                next_sleep = CHARGING_INTERVAL
             elif extended_idle:
                 logger.info(
                     "[poll] extended idle (%.1f hr since last movement); "
@@ -1802,7 +2038,7 @@ async def _poll_loop(vin: str, interval: float) -> None:
                 )
                 next_sleep = EXTENDED_IDLE_INTERVAL
             elif overnight():
-                next_sleep = OVERNIGHT_INTERVAL
+                next_sleep = overnight_sleep()
             else:
                 next_sleep = PARKED_INTERVAL
             await asyncio.sleep(next_sleep)

@@ -104,9 +104,13 @@ hit P → unlock to force a refresh.)
 
 After the next drive:
 ```bash
-curl -s -u colin:goblin "https://tesla.burnsbuilt.co/api/events?type=telemetry_push&limit=5"
+curl -s -u "$SITE_USER:$SITE_PASSWORD" \
+    "https://tesla.burnsbuilt.co/api/events?type=driver_sample&limit=5"
 ```
 Should show 1Hz-cadence samples with real lat/lon and speed.
+
+> Note: real Basic-auth credentials were previously committed in this file —
+> rotate SITE_PASSWORD if you haven't since.
 
 ## Cost
 

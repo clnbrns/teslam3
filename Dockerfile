@@ -10,8 +10,10 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir -e .
 
 # Railway mounts the volume here; SQLite + token store both live in /data.
+# TZ matters: the poller's overnight window and daily buckets are local-time.
 ENV TESLA_DB_PATH=/data/tesla.db \
     TOKEN_STORE_PATH=/data/.tokens.json \
+    TZ=America/Chicago \
     PORT=8080
 
 EXPOSE 8080

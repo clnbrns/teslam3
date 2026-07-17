@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "python-dotenv>=1.0",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

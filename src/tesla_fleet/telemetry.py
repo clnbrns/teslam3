@@ -19,18 +19,26 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-from tesla_fleet import db
+from tesla_fleet import alerts, charging, db
 from tesla_fleet.client import TeslaFleetClient
 
 logger = logging.getLogger(__name__)
 
-# Fields we ask Tesla to stream. Frequency in milliseconds between samples.
+# Fields we ask Tesla to stream. Frequency in seconds between samples.
 # Reference: https://developer.tesla.com/docs/fleet-api/telemetry/available-data
+#
+# ONLY confirmed field names go in TELEMETRY_FIELDS — Tesla rejects a
+# fleet_telemetry_config containing unknown fields, which would silently
+# leave the car streaming nothing. Unverified names live in
+# SPECULATIVE_FIELDS and are opt-in via register(..., include_speculative=True)
+# once each name is confirmed against the current telemetry spec.
 TELEMETRY_FIELDS: dict[str, dict[str, Any]] = {
+    # 1 Hz speed is the backbone: trips, hard-brake/rapid-accel, max speed.
     "VehicleSpeed":              {"interval_seconds": 1, "minimum_delta": 0.5},
     "Location":                  {"interval_seconds": 5},
     "Gear":                      {"interval_seconds": 1},
@@ -48,11 +56,16 @@ TELEMETRY_FIELDS: dict[str, dict[str, Any]] = {
     "VehicleName":               {"interval_seconds": 3600},
     "Locked":                    {"interval_seconds": 60},
     "ChargeLimitSoc":            {"interval_seconds": 300},
-    # Driving dynamics — used for brake/accel detection on the server side.
+}
+
+# NOT registered by default. Verify each name against Tesla's field list
+# (developer.tesla.com → Fleet Telemetry → available-data) before enabling:
+# a single unknown field fails the whole config registration.
+SPECULATIVE_FIELDS: dict[str, dict[str, Any]] = {
+    # Driving dynamics — nicer brake/accel signal than speed deltas.
     "AcceleratorPedalPosition":  {"interval_seconds": 1},
     "BrakePedalPosition":        {"interval_seconds": 1},
-    # Tesla SW 2026.8+ cabin-camera fields. Field names are best-effort —
-    # rename to match Tesla's actual telemetry spec once confirmed.
+    # Tesla SW 2026.8+ cabin-camera fields (names are best-effort).
     "CabinCameraDriverProfile":  {"interval_seconds": 30},   # face-verified driver
     "DriverGazeAway":            {"interval_seconds": 1, "minimum_delta": 1},
     "DriverPhoneUse":            {"interval_seconds": 1, "minimum_delta": 1},
@@ -64,8 +77,22 @@ HARD_BRAKE_MPHS = -7.0
 RAPID_ACCEL_MPHS = 7.0
 
 
-def build_config(hostname: str, vin: str, port: int = 443) -> dict:
+def _parse_iso_ts(s: str | None) -> float | None:
+    """Parse Tesla's ISO-8601 createdAt (with or without trailing Z)."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def build_config(hostname: str, vin: str, port: int = 443,
+                 include_speculative: bool = False) -> dict:
     """Construct the body for POST /api/1/vehicles/{vin}/fleet_telemetry_config."""
+    fields = dict(TELEMETRY_FIELDS)
+    if include_speculative:
+        fields.update(SPECULATIVE_FIELDS)
     return {
         "vins": [vin],
         "config": {
@@ -73,13 +100,14 @@ def build_config(hostname: str, vin: str, port: int = 443) -> dict:
             "port": port,
             "ca": "",  # Tesla-trusted CA chain; empty falls back to public CAs
             "exp": int(time.time()) + 30 * 24 * 3600,  # 30 days; refresh periodically
-            "fields": TELEMETRY_FIELDS,
+            "fields": fields,
         },
     }
 
 
 async def register(client: TeslaFleetClient, hostname: str, vin: str,
-                   proxy_url: str | None = None) -> dict:
+                   proxy_url: str | None = None,
+                   include_speculative: bool = False) -> dict:
     """Push the telemetry config to Tesla. Idempotent — overwrites prior config.
 
     Tesla requires this call to go through the Vehicle Command Proxy, which
@@ -87,12 +115,14 @@ async def register(client: TeslaFleetClient, hostname: str, vin: str,
     (e.g. https://vcp.burnsbuilt.co), route through it; otherwise hit Tesla
     directly (will fail with 400 "must be called through proxy").
     """
-    body = build_config(hostname, vin)
+    body = build_config(hostname, vin, include_speculative=include_speculative)
     path = "/api/1/vehicles/fleet_telemetry_config_create"
 
     if proxy_url:
         # Proxy expects an Authorization header it forwards upstream.
-        async with httpx.AsyncClient(base_url=proxy_url, timeout=30, verify=False) as proxy:
+        # TLS is verified — the VCP sits behind Railway's Let's Encrypt cert,
+        # and this channel carries the OAuth bearer token.
+        async with httpx.AsyncClient(base_url=proxy_url, timeout=30) as proxy:
             await client._ensure_fresh()
             resp = await proxy.post(
                 path, json=body,
@@ -108,7 +138,7 @@ async def unregister(client: TeslaFleetClient, vin: str,
     """Disable streaming for a VIN (back to polling-only)."""
     path = f"/api/1/vehicles/{vin}/fleet_telemetry_config"
     if proxy_url:
-        async with httpx.AsyncClient(base_url=proxy_url, timeout=30, verify=False) as proxy:
+        async with httpx.AsyncClient(base_url=proxy_url, timeout=30) as proxy:
             await client._ensure_fresh()
             resp = await proxy.delete(
                 path,
@@ -187,10 +217,7 @@ def ingest_payload(payload: dict, *, default_driver: str | None = None) -> int:
         else:
             by_key[k] = v
         if not sample_ts:
-            try:
-                sample_ts = httpx._parse_date(r.get("createdAt") or "").timestamp()
-            except Exception:
-                sample_ts = None
+            sample_ts = _parse_iso_ts(r.get("createdAt"))
 
     if not sample_ts:
         sample_ts = time.time()
@@ -225,6 +252,7 @@ def ingest_payload(payload: dict, *, default_driver: str | None = None) -> int:
     }
 
     written = 0
+    alerts.maybe_alert_sample(record)
     with db.connect() as conn:
         if db.record_event(conn, record):
             written += 1
@@ -250,5 +278,15 @@ def ingest_payload(payload: dict, *, default_driver: str | None = None) -> int:
                 conn, vin,
                 odometer_mi=odo_mi,
                 charge_energy_added_kwh=charge_kwh,
+            )
+        # Live charge-session boundary detection (same tracker as the poller).
+        if by_key.get("ChargeState") is not None or charge_kwh is not None:
+            charging.observe(
+                conn, vin,
+                ts=sample_ts,
+                charging_state=by_key.get("ChargeState"),
+                charge_energy_added=charge_kwh,
+                fast_charger_present=bool(by_key.get("DCChargingEnergyIn")),
+                lat=lat, lon=lon,
             )
     return written
